@@ -15,9 +15,16 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+> **Platform support**
+>
+> The scripts are pure Python and rely on cross-platform libraries (OpenCV, ONNX Runtime, FAISS).
+> They have been exercised on Linux and macOS (Intel & Apple Silicon) as long as you install the
+> matching wheels. Homebrew-provided `ffmpeg`/`opencv` binaries are sufficient on macOS.
+
 Download or export the desired CLIP/CN-CLIP ONNX checkpoints. The pipeline expects separate
 image and text encoder ONNX files as well as a compatible tokenizer (Hugging Face tokenizers
-are supported).
+are supported). Models are **not** bundled in the repository—you need to supply your own ONNX
+checkpoints (see [Models](#models)).
 
 ## Repository layout
 
@@ -107,6 +114,19 @@ python scripts/query_index.py "a dog running on the beach" \
 The output is a JSON array with the top matches, each containing the frame image path and
 timestamp for easy inspection.
 
+## Models
+
+The repository ships only the orchestration code. Bring your own CLIP/CN-CLIP checkpoints by:
+
+1. Exporting them to ONNX yourself (Hugging Face `optimum` or `transformers` can export most
+   checkpoints) **or** downloading pre-exported ONNX weights published by the model authors.
+2. Placing the image encoder, text encoder, and tokenizer path/identifier somewhere accessible
+   to the scripts (local path or Hugging Face Hub ID).
+
+The example commands in this README reference placeholder paths such as `/path/to/clip_image.onnx`—
+replace them with your actual checkpoints. Without these files, the scripts will raise a
+`FileNotFoundError` during inference.
+
 ## Metadata schema
 
 Each metadata JSON file uses the following structure:
@@ -145,3 +165,24 @@ consumed by the FAISS builder and downstream tools.
   Disable normalization via `--no-normalize` if your embeddings are already normalized.
 * The scripts operate purely on local files; feel free to adapt them into an API or scheduler for
   large-scale ingestion.
+
+## FAQ
+
+### Where is the code stored?
+
+All pipeline code and scripts live inside this Git repository under `video_search/` and `scripts/`.
+Clone or download the repo (e.g. via `git clone` or GitHub's download ZIP) to get the exact files
+referenced in the pull request screenshot.
+
+### Can I run this on macOS?
+
+Yes. Create a virtual environment with Python 3.9+, install the dependencies via `pip install -r
+requirements.txt`, and ensure `ffmpeg` is installed (`brew install ffmpeg`). For Apple Silicon, pip
+will fetch ARM-compatible wheels automatically; if FAISS wheels are unavailable, fall back to
+`pip install faiss-cpu==1.7.4` via conda-forge or use Docker.
+
+### Do I need anything besides this repository?
+
+You must provide ONNX model files and a tokenizer. The repository does not contain pre-trained
+weights to keep the size manageable and respect upstream licenses. Once you place the ONNX files on
+disk and point the scripts to them, the commands run end-to-end without additional services.
