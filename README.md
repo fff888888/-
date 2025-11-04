@@ -1,13 +1,21 @@
-# Video semantic search pipeline
+# 视频语义检索流水线
 
-This repository provides a reproducible pipeline for building a frame-level video search system
-with CN-CLIP/CLIP ONNX checkpoints. The workflow extracts keyframes, generates multimodal
-embeddings, persists structured metadata, indexes vectors with FAISS, and exposes a simple
-text-based retrieval script.
+本仓库提供一套可复现的视频逐帧语义检索方案，涵盖以下模块：
 
-## Installation
+- OpenCV/FFmpeg 抽帧与关键帧时间戳记录
+- CLIP 与 CN-CLIP ONNX 模型推理封装
+- 帧级别特征向量缓存与元数据管理
+- 基于 FAISS 的向量索引构建与持久化
+- 文本查询 → 特征匹配 → 返回关键帧路径和时间戳
 
-Create a Python environment (3.9+) and install the dependencies:
+> 💡 **仓库位置说明**：你在 Git 中看到的正是本目录的内容，所有脚本均位于 `scripts/`，可复用模块在 `video_search/` 中。克隆或下载本仓库即可获得全部代码。
+
+## 1. 环境准备
+
+### 1.1 Python 依赖
+
+- 支持 Python 3.9 及以上版本
+- 建议使用虚拟环境隔离依赖：
 
 ```bash
 python -m venv .venv
@@ -15,45 +23,62 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-> **Platform support**
->
-> The scripts are pure Python and rely on cross-platform libraries (OpenCV, ONNX Runtime, FAISS).
-> They have been exercised on Linux and macOS (Intel & Apple Silicon) as long as you install the
-> matching wheels. Homebrew-provided `ffmpeg`/`opencv` binaries are sufficient on macOS.
+### 1.2 平台支持
 
-Download or export the desired CLIP/CN-CLIP ONNX checkpoints. The pipeline expects separate
-image and text encoder ONNX files as well as a compatible tokenizer (Hugging Face tokenizers
-are supported). Models are **not** bundled in the repository—you need to supply your own ONNX
-checkpoints (see [Models](#models)).
+| 系统 | 说明 |
+| --- | --- |
+| Linux | 直接安装依赖即可 |
+| macOS (Intel/Apple Silicon) | 需提前安装 Homebrew，并使用 `brew install ffmpeg` 获取 FFmpeg；pip 会自动选择合适的 wheels |
 
-## Repository layout
+如使用 Apple Silicon (M1/M2) 且 pip 未提供 FAISS 预编译包，可改用 `conda install -c conda-forge faiss-cpu==1.7.4`。
+
+### 1.3 额外工具
+
+- FFmpeg：用于精确抽帧和视频信息读取
+- OpenCV：用于读取与保存帧图
+
+macOS 用户可通过 Homebrew 安装：`brew install ffmpeg opencv`。
+
+## 2. 模型文件准备
+
+仓库**不包含**任何预训练模型权重，你需要自行准备：
+
+1. ONNX 图像编码器（`clip_image.onnx` 或 `cnclip_image.onnx`）
+2. ONNX 文本编码器（`clip_text.onnx` 或 `cnclip_text.onnx`）
+3. 与文本编码器匹配的分词器（可使用 Hugging Face Hub 上的 tokenizer 名称）
+
+可以使用 Hugging Face `optimum` 或 `transformers` 导出 ONNX，也可直接下载社区提供的 ONNX 权重。后续所有脚本均通过命令行参数传入这些文件路径。
+
+> ❗ 没有准备模型时，脚本会在推理阶段抛出 `FileNotFoundError`，因此下载本仓库后仍需补充模型文件才能完整运行。
+
+## 3. 目录结构
 
 ```
 scripts/
-  extract_keyframes.py   # Only extract frames + metadata
-  process_video.py       # Full pipeline: frames + embeddings + metadata
-  build_index.py         # Construct FAISS index from metadata
-  query_index.py         # Query FAISS index with text
+  extract_keyframes.py   # 抽帧与元数据生成
+  process_video.py       # 从视频到特征向量的完整流程
+  build_index.py         # 构建 FAISS 索引
+  query_index.py         # 载入索引并执行文本检索
 video_search/
-  frames.py              # OpenCV based frame extraction helpers
-  features.py            # ONNX Runtime wrapper for CN-CLIP/CLIP
-  index.py               # FAISS indexing utilities
-  metadata.py            # Dataclasses for metadata I/O
+  frames.py              # 抽帧工具函数
+  features.py            # CLIP/CN-CLIP ONNX 推理封装
+  index.py               # 向量索引构建与查询
+  metadata.py            # 元数据结构与读写
 ```
 
-Generated assets follow this structure by default:
+默认产出目录：
 
 ```
 data/
-  frames/<video-name>/frame_*.jpg
-  embeddings/<model>/<video-name>/frame_features.npy
-  metadata/<video-name>.json
-  index/frame.index + frame.index.json
+  frames/<video名称>/frame_*.jpg
+  embeddings/<模型>/<视频名称>/frame_features.npy
+  metadata/<视频名称>.json
+  index/frame.index 与 frame.index.json
 ```
 
-## Usage
+## 4. 使用流程
 
-### 1. Extract keyframes (optional standalone)
+### 4.1 （可选）仅抽取关键帧
 
 ```bash
 python scripts/extract_keyframes.py /path/to/video.mp4 \
@@ -63,73 +88,29 @@ python scripts/extract_keyframes.py /path/to/video.mp4 \
   --metadata data/metadata/video.json
 ```
 
-* `--method` can be `interval` (sample every *n* seconds) or `scene-diff` (mean pixel
-  difference threshold).
-* Timestamps and frame indices are stored in the metadata JSON.
+- `--method` 支持 `interval`（每隔 *n* 秒取一帧）或 `scene-diff`（基于帧差）
+- 元数据 JSON 中会记录每一帧的时间戳和序号
 
-### 2. Process a video end-to-end
+### 4.2 视频到特征向量的一站式处理
 
 ```bash
 python scripts/process_video.py /path/to/video.mp4 \
   --image-model /path/to/clip_image.onnx \
   --text-model /path/to/clip_text.onnx \
-  --tokenizer /path/to/tokenizer_or_hub_id \
+  --tokenizer openai/clip-vit-base-patch32 \
   --model-type clip \
   --interval 1.0 \
   --output-root data
 ```
 
-This command extracts frames, computes CN-CLIP/CLIP embeddings for each frame, and writes a
-metadata file capturing:
+该命令会完成：
 
-* `video_path`, `fps`, frame extraction settings
-* `frames`: per-frame objects containing `timestamp`, `image_path`, and the embedding index
-* `feature_file`: `.npy` array storing all frame vectors for the video
-* ONNX/tokenizer paths to ensure reproducibility
+1. 抽帧并保存 JPEG 图像
+2. 调用 ONNX Runtime 计算每帧特征
+3. 将全部帧向量保存为 `.npy` 文件
+4. 生成包含视频路径、时间戳、特征文件路径等字段的元数据 JSON
 
-Embeddings are cached on disk (`frame_features.npy`) to prevent recomputation.
-
-### 3. Build a FAISS index
-
-```bash
-python scripts/build_index.py data/metadata/video.json \
-  --output data/index/frame.index
-```
-
-You can provide multiple metadata files to index several videos simultaneously. The script saves
-both the FAISS index and a manifest JSON describing every frame entry.
-
-### 4. Query with natural language
-
-```bash
-python scripts/query_index.py "a dog running on the beach" \
-  --index data/index/frame.index \
-  --image-model /path/to/clip_image.onnx \
-  --text-model /path/to/clip_text.onnx \
-  --tokenizer /path/to/tokenizer_or_hub_id \
-  --model-type clip \
-  --top-k 5
-```
-
-The output is a JSON array with the top matches, each containing the frame image path and
-timestamp for easy inspection.
-
-## Models
-
-The repository ships only the orchestration code. Bring your own CLIP/CN-CLIP checkpoints by:
-
-1. Exporting them to ONNX yourself (Hugging Face `optimum` or `transformers` can export most
-   checkpoints) **or** downloading pre-exported ONNX weights published by the model authors.
-2. Placing the image encoder, text encoder, and tokenizer path/identifier somewhere accessible
-   to the scripts (local path or Hugging Face Hub ID).
-
-The example commands in this README reference placeholder paths such as `/path/to/clip_image.onnx`—
-replace them with your actual checkpoints. Without these files, the scripts will raise a
-`FileNotFoundError` during inference.
-
-## Metadata schema
-
-Each metadata JSON file uses the following structure:
+元数据样例：
 
 ```json
 {
@@ -154,35 +135,73 @@ Each metadata JSON file uses the following structure:
 }
 ```
 
-The `embedding_index` aligns each frame entry with the row inside `feature_file`. This metadata is
-consumed by the FAISS builder and downstream tools.
+### 4.3 构建 FAISS 索引
 
-## Notes
+```bash
+python scripts/build_index.py data/metadata/video.json \
+  --output data/index/frame.index
+```
 
-* Ensure the tokenizer matches the ONNX text encoder vocabulary (e.g. CN-CLIP requires a
-  Chinese tokenizer such as `OFA-Sys/chinese-clip-vit-base-patch16`).
-* FAISS normalization defaults to cosine similarity (`IndexFlatIP` with L2-normalized vectors).
-  Disable normalization via `--no-normalize` if your embeddings are already normalized.
-* The scripts operate purely on local files; feel free to adapt them into an API or scheduler for
-  large-scale ingestion.
+- 支持一次传入多个元数据文件，实现多视频联合检索
+- 会额外生成 `frame.index.json`，记录索引中每一条向量对应的元数据
 
-## FAQ
+### 4.4 文本检索
 
-### Where is the code stored?
+```bash
+python scripts/query_index.py "海滩上奔跑的狗" \
+  --index data/index/frame.index \
+  --image-model /path/to/clip_image.onnx \
+  --text-model /path/to/clip_text.onnx \
+  --tokenizer openai/clip-vit-base-patch32 \
+  --model-type clip \
+  --top-k 5
+```
 
-All pipeline code and scripts live inside this Git repository under `video_search/` and `scripts/`.
-Clone or download the repo (e.g. via `git clone` or GitHub's download ZIP) to get the exact files
-referenced in the pull request screenshot.
+脚本会输出一个 JSON 数组，每个元素包含匹配帧的路径与时间戳，便于回放定位。
 
-### Can I run this on macOS?
+## 5. 常见问题解答
 
-Yes. Create a virtual environment with Python 3.9+, install the dependencies via `pip install -r
-requirements.txt`, and ensure `ffmpeg` is installed (`brew install ffmpeg`). For Apple Silicon, pip
-will fetch ARM-compatible wheels automatically; if FAISS wheels are unavailable, fall back to
-`pip install faiss-cpu==1.7.4` via conda-forge or use Docker.
+### 5.1 我在 Git 看到了这些文件，是不是已经包含所有代码？
 
-### Do I need anything besides this repository?
+是的，`video_search/` 与 `scripts/` 目录中就是完整实现。只需克隆或下载本仓库，即可得到与当前环境一致的代码。
 
-You must provide ONNX model files and a tokenizer. The repository does not contain pre-trained
-weights to keep the size manageable and respect upstream licenses. Once you place the ONNX files on
-disk and point the scripts to them, the commands run end-to-end without additional services.
+### 5.2 苹果电脑能跑吗？
+
+可以。macOS 需安装 Homebrew，然后执行：
+
+```bash
+brew install ffmpeg opencv
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+安装后即可使用脚本。若在 Apple Silicon 上遇到 FAISS 编译问题，可改用 `conda install -c conda-forge faiss-cpu==1.7.4`。
+
+### 5.3 我只下载仓库，不提供模型能用吗？
+
+下载仓库后可以直接运行抽帧、元数据与索引脚本，但推理和检索环节必须加载你提供的 ONNX 模型与 tokenizer。仓库仅提供执行逻辑，不包含任何预训练权重。
+
+### 5.4 后续如何扩展？
+
+- `video_search/features.py` 可扩展其它 ONNX 模型或量化版本
+- `video_search/index.py` 支持替换为 HNSW、Annoy 等其它向量库
+- 可以将 `scripts/` 中的命令行脚本改造成 API 或批量任务调度器
+
+## 6. 快速验证
+
+完成依赖安装后，可运行：
+
+```bash
+python -m compileall video_search scripts
+```
+
+该命令会检查 Python 语法是否正确，确保脚本在当前环境下可被解释执行。
+
+## 7. 下一步建议
+
+1. 准备目标视频并执行 `scripts/process_video.py`
+2. 利用生成的元数据构建索引 `scripts/build_index.py`
+3. 使用 `scripts/query_index.py` 输入中文或英文描述进行检索
+
+祝你顺利搭建自己的视频语义检索流程！
