@@ -10,6 +10,16 @@
 
 > 💡 **仓库位置说明**：你在 Git 中看到的正是本目录的内容，所有脚本均位于 `scripts/`，可复用模块在 `video_search/` 中。克隆或下载本仓库即可获得全部代码。
 
+## 0. 快速上手（一分钟了解）
+
+1. **下载/克隆仓库**：确保你当前目录就是包含 `scripts/` 与 `video_search/` 的仓库根目录。
+2. **准备运行环境**：创建 Python 虚拟环境，执行 `pip install -r requirements.txt` 安装依赖；macOS 用户额外用 Homebrew 安装 `ffmpeg` 与 `opencv`。
+3. **下载模型权重**：准备 CLIP 或 CN-CLIP 的图像/文本 ONNX 文件以及对应 tokenizer 名称，并记住它们的路径。
+4. **处理你的视频**：运行 `python scripts/process_video.py <视频路径> --image-model <图像模型.onnx> --text-model <文本模型.onnx> --tokenizer <tokenizer>`，脚本会自动抽帧、生成特征与元数据。
+5. **构建索引并查询**：执行 `python scripts/build_index.py <metadata.json>` 生成向量索引，再用 `python scripts/query_index.py "你的文本描述" ...` 检索最相似的帧和时间戳。
+
+下面的章节会对每个步骤做更详细的解释与可选项介绍，你可以根据需要深入阅读。
+
 ## 1. 环境准备
 
 ### 1.1 Python 依赖
