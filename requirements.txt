@@ -4,3 +4,5 @@ transformers
 faiss-cpu
 numpy
 Pillow
+fastapi
+uvicorn

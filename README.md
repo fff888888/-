@@ -17,6 +17,7 @@
 3. **下载模型权重**：准备 CLIP 或 CN-CLIP 的图像/文本 ONNX 文件以及对应 tokenizer 名称，并记住它们的路径。
 4. **处理你的视频**：运行 `python scripts/process_video.py <视频路径> --image-model <图像模型.onnx> --text-model <文本模型.onnx> --tokenizer <tokenizer>`，脚本会自动抽帧、生成特征与元数据。
 5. **构建索引并查询**：执行 `python scripts/build_index.py <metadata.json>` 生成向量索引，再用 `python scripts/query_index.py "你的文本描述" ...` 检索最相似的帧和时间戳。
+6. **图形化使用界面**：准备好索引和模型后，运行 `python scripts/run_web_app.py data/index/frame.index --text-model /path/to/text.onnx --tokenizer openai/clip-vit-base-patch32`，浏览器会自动打开可视化站点，输入语义词即可悬停预览并下载片段。
 
 下面的章节会对每个步骤做更详细的解释与可选项介绍，你可以根据需要深入阅读。
 
@@ -69,11 +70,13 @@ scripts/
   process_video.py       # 从视频到特征向量的完整流程
   build_index.py         # 构建 FAISS 索引
   query_index.py         # 载入索引并执行文本检索
+  run_web_app.py         # 启动交互式网站，完成搜索、预览与片段下载
 video_search/
   frames.py              # 抽帧工具函数
   features.py            # CLIP/CN-CLIP ONNX 推理封装
   index.py               # 向量索引构建与查询
   metadata.py            # 元数据结构与读写
+  webapp.py              # FastAPI Web UI 逻辑
 ```
 
 默认产出目录：
@@ -168,6 +171,35 @@ python scripts/query_index.py "海滩上奔跑的狗" \
 ```
 
 脚本会输出一个 JSON 数组，每个元素包含匹配帧的路径与时间戳，便于回放定位。
+
+## 6. 交互式网站（Web UI）
+
+当命令行结果已经可用时，你可以切换到网页界面，直接在浏览器里输入语义词、悬停预览并下载片段。
+
+### 6.1 启动方式
+
+```bash
+python scripts/run_web_app.py data/index/frame.index \
+  --text-model /path/to/clip_text.onnx \
+  --tokenizer openai/clip-vit-base-patch32 \
+  --manifest data/index/frame.index.json \
+  --host 0.0.0.0 --port 8000
+```
+
+- `--image-model` 可选，仅在未来扩展需要图像模型时再传入。
+- 默认会自动打开浏览器标签页，如果你计划把脚本做成桌面快捷方式，可新建一个 `.bat`（Windows）或 `.command`（macOS）文件，内容就是上述命令，双击即可启动。
+- 需要 `ffmpeg` 可执行文件以便后台截取片段；若未安装请先按前文说明配置。
+
+### 6.2 页面交互说明
+
+1. **顶部搜索框**：输入任意语义词点击“开始搜索”，后台调用同一套 CLIP/CN-CLIP 推理逻辑并检索 FAISS 索引。
+2. **候选卡片**：搜索结果以卡片形式展示，鼠标悬停时视频自动跳到匹配时间点并播放，便于快速预览；移开后自动暂停并回到起始位置。
+3. **详情面板**：点击任意卡片即展开右侧面板，支持：
+   - 查看视频名称、帧索引与精确时间戳；
+   - 拖动/输入开始与结束时间，或使用 `±0.5s/±1s` 按钮微调；
+   - 直接点击“下载这个片段”调用 FFmpeg 裁剪所选区间，浏览器会弹出下载对话框。
+
+你也可以通过 `--default-top-k` 与 `--preview-duration` 调整默认展示数量与悬停预览的时间窗口，以适配不同素材密度。
 
 ## 5. 常见问题解答
 
