@@ -7,9 +7,7 @@ import argparse
 import json
 from pathlib import Path
 
-from video_search.features import OnnxClipEncoder, build_frame_feature_cache
-from video_search.frames import extract_keyframes
-from video_search.metadata import VideoMetadata, save_metadata
+from video_search.pipeline import process_video_to_embeddings
 
 
 def parse_args() -> argparse.Namespace:
@@ -82,56 +80,23 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    video = args.video
-    root = args.output_root
-    frames_dir = root / "frames" / video.stem
-    embeddings_dir = root / "embeddings" / args.model_type / video.stem
-    metadata_path = args.metadata or root / "metadata" / f"{video.stem}.json"
-
-    frames_dir.mkdir(parents=True, exist_ok=True)
-    embeddings_dir.mkdir(parents=True, exist_ok=True)
-
-    frames, fps = extract_keyframes(
-        video_path=video,
-        output_dir=frames_dir,
+    result = process_video_to_embeddings(
+        video_path=args.video,
+        output_root=args.output_root,
+        model_type=args.model_type,
+        image_model_path=args.image_model,
+        text_model_path=args.text_model,
+        tokenizer_path=args.tokenizer,
         method=args.method,
         interval=args.interval,
         scene_threshold=args.scene_threshold,
         image_format=args.image_format,
         quality=args.quality,
-    )
-
-    encoder = OnnxClipEncoder(
-        model_type=args.model_type,
-        image_model_path=args.image_model,
-        text_model_path=args.text_model,
-        tokenizer_path=args.tokenizer,
-        device=args.device,
-    )
-
-    feature_path = embeddings_dir / "frame_features.npy"
-    cache = build_frame_feature_cache(
-        frames=frames,
-        encoder=encoder,
-        output_path=feature_path,
         batch_size=args.batch_size,
+        device=args.device,
+        metadata_path=args.metadata,
     )
-
-    metadata = VideoMetadata(
-        video_path=str(video),
-        frames=cache.frames,
-        feature_file=str(feature_path),
-        embedding_dim=int(cache.features.shape[1]) if cache.features.size else encoder.dimension,
-        model_type=args.model_type,
-        image_model_path=str(args.image_model),
-        text_model_path=str(args.text_model) if args.text_model else None,
-        tokenizer_path=args.tokenizer,
-        frame_interval=args.interval if args.method == "interval" else None,
-        fps=fps,
-        method=args.method,
-    )
-    save_metadata(metadata, metadata_path)
-    print(json.dumps(metadata.to_dict(), indent=2, ensure_ascii=False))
+    print(json.dumps(result.metadata.to_dict(), indent=2, ensure_ascii=False))
 
 
 if __name__ == "__main__":

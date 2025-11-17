@@ -17,7 +17,7 @@
 3. **下载模型权重**：准备 CLIP 或 CN-CLIP 的图像/文本 ONNX 文件以及对应 tokenizer 名称，并记住它们的路径。
 4. **处理你的视频**：运行 `python scripts/process_video.py <视频路径> --image-model <图像模型.onnx> --text-model <文本模型.onnx> --tokenizer <tokenizer>`，脚本会自动抽帧、生成特征与元数据。
 5. **构建索引并查询**：执行 `python scripts/build_index.py <metadata.json>` 生成向量索引，再用 `python scripts/query_index.py "你的文本描述" ...` 检索最相似的帧和时间戳。
-6. **图形化使用界面**：若你沿用本仓库推荐的 `workspace/` 或 `data/` 目录结构，可直接执行 `python scripts/start_web.py` 自动寻找索引与模型并启动；需要自定义路径时，则使用 `python scripts/run_web_app.py data/index/frame.index --text-model /path/to/text.onnx --tokenizer openai/clip-vit-base-patch32` 明确传参。
+6. **图形化使用界面**：若你沿用本仓库推荐的 `workspace/` 或 `data/` 目录结构，可直接执行 `python scripts/start_web.py` 自动寻找索引与模型；macOS/Windows 用户也可以双击仓库根目录的 `start_app.py` 达到同样效果。需要自定义路径时，则使用 `python scripts/run_web_app.py data/index/frame.index --text-model /path/to/text.onnx --tokenizer openai/clip-vit-base-patch32` 明确传参。
 
 下面的章节会对每个步骤做更详细的解释与可选项介绍，你可以根据需要深入阅读。
 
@@ -177,7 +177,7 @@ python scripts/query_index.py "海滩上奔跑的狗" \
 
 当命令行结果已经可用时，你可以切换到网页界面，直接在浏览器里输入语义词、悬停预览并下载片段。
 
-### 5.1 一键启动脚本（start_web.py）
+### 5.1 一键启动脚本（start_web.py / start_app.py）
 
 如果你按照示例目录放置素材（例如 `workspace/index/faiss.index`、`workspace/index/manifest.json`、`models/clip-vit-b32-vision.onnx`、`models/clip-vit-b32-text.onnx`、`models/tokenizer/`），可以直接运行：
 
@@ -195,7 +195,7 @@ python scripts/start_web.py
 
 找到即用，找不到就提示报错，并允许通过命令行选项覆盖，例如 `python scripts/start_web.py --index my_index/frame.index --text-model /tmp/clip_text.onnx`。
 
-默认会监听 `0.0.0.0:8000` 并自动打开浏览器，方便在 Mac、iPad 或其它局域网设备上访问；若不希望自动打开，可加 `--no-browser`。
+默认会监听 `0.0.0.0:8000` 并自动打开浏览器，方便在 Mac、iPad 或其它局域网设备上访问；若不希望自动打开，可加 `--no-browser`。如果你更习惯图形化操作，macOS/Windows 可以直接双击仓库根目录的 `start_app.py`，其内部调用的也是 `scripts/start_web.py`。
 
 ### 5.2 自定义启动（run_web_app.py）
 
@@ -211,7 +211,31 @@ python scripts/run_web_app.py data/index/frame.index \
 - 默认会自动打开浏览器标签页，如果你计划把脚本做成桌面快捷方式，可新建一个 `.bat`（Windows）或 `.command`（macOS）文件，内容就是上述命令，双击即可启动。
 - 需要 `ffmpeg` 可执行文件以便后台截取片段；若未安装请先按前文说明配置。
 
-### 5.3 页面交互说明
+### 5.3 素材管理 / 视频批量处理
+
+新版网页在搜索框下方新增了“素材管理 / 视频批量处理”区域，允许你直接上传 MP4/MOV 等文件，后台会完成下列动作：
+
+1. 将上传文件保存到 `workspace/videos/`（或 `--workspace-dir` 指定的目录），文件名自动加上时间戳避免冲突。
+2. 使用与命令行一致的流程抽帧、生成特征、写入元数据（内部复用 `process_video.py`/`build_index.py` 抽象出来的 pipeline）。
+3. 把新视频的向量直接追加到当前的 FAISS 索引与 manifest，整个站点无需重启即可检索到最新素材。
+
+前端会在三个阶段给出反馈：
+
+- **处理中**：点击“上传并处理”后，按钮会切换为“处理中...”并在状态栏提示“正在上传并处理，请稍候...”；
+- **成功**：后台返回 `{"success": true, ...}` 时，会提示“处理完成，可以开始检索（已保存到 ...）”；
+- **失败**：若返回 `success: false` 或 HTTP 报错，则直接展示 `message/detail` 字段的文字，例如“处理失败: 缺少模型文件”。
+
+对应的接口定义：
+
+```
+POST /api/add_video
+Form-Data: file=<UploadFile>
+返回：{"success": bool, "message": str, "video_path": str, "metadata_path": str, "index_path": str}
+```
+
+若服务器未配置图像模型（`--image-model` 未找到），该区域会自动隐藏上传表单并提示“仅可检索已有素材”。
+
+### 5.4 页面交互说明
 
 1. **顶部搜索框**：输入任意语义词点击“开始搜索”，后台调用同一套 CLIP/CN-CLIP 推理逻辑并检索 FAISS 索引。
 2. **候选卡片**：搜索结果以卡片形式展示，鼠标悬停时视频自动跳到匹配时间点并播放，便于快速预览；移开后自动暂停并回到起始位置。
@@ -222,7 +246,7 @@ python scripts/run_web_app.py data/index/frame.index \
 
 你也可以通过 `--default-top-k` 与 `--preview-duration` 调整默认展示数量与悬停预览的时间窗口，以适配不同素材密度。
 
-### 5.4 常见报错与排查
+### 5.5 常见报错与排查
 
 - **`Invalid input name: attention_mask`**：说明文本 ONNX 模型使用了带别名的输入名称。升级到本 README 对应的最新代码，或在命令行确认 `video_search/features.py` 的 `describe_text_inputs()` 输出中是否包含 `mask`/`segment`/`ids` 等字段。
 - **`Tokenizer 输出没有匹配到任何文本模型需要的输入`**：通常是 tokenizer 与模型不匹配或 `--tokenizer` 参数填写错误。请确保 tokenizer 与导出的 ONNX 模型来自同一个 CLIP/CN-CLIP 版本，并且路径/名称正确无误。

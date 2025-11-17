@@ -6,7 +6,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from video_search.index import build_index_from_metadata
+from video_search.pipeline import build_or_update_index
 
 
 def parse_args() -> argparse.Namespace:
@@ -44,12 +44,14 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    indexer = build_index_from_metadata(
+    build_or_update_index(
         metadata_paths=args.metadata,
+        index_path=args.output,
+        manifest_path=args.manifest,
         metric=args.metric,
         normalize=not args.no_normalize,
+        reset=True,
     )
-    indexer.save(args.output, args.manifest)
     print(f"Index saved to {args.output}")
 
 
