@@ -222,6 +222,12 @@ python scripts/run_web_app.py data/index/frame.index \
 
 你也可以通过 `--default-top-k` 与 `--preview-duration` 调整默认展示数量与悬停预览的时间窗口，以适配不同素材密度。
 
+### 5.4 常见报错与排查
+
+- **`Invalid input name: attention_mask`**：说明文本 ONNX 模型使用了带别名的输入名称。升级到本 README 对应的最新代码，或在命令行确认 `video_search/features.py` 的 `describe_text_inputs()` 输出中是否包含 `mask`/`segment`/`ids` 等字段。
+- **`Tokenizer 输出没有匹配到任何文本模型需要的输入`**：通常是 tokenizer 与模型不匹配或 `--tokenizer` 参数填写错误。请确保 tokenizer 与导出的 ONNX 模型来自同一个 CLIP/CN-CLIP 版本，并且路径/名称正确无误。
+- **下载片段时报 `ffmpeg` 找不到**：请确认已经安装 FFmpeg，并将其加入 `PATH`。macOS 用户可执行 `brew install ffmpeg`，Windows 用户需要将 FFmpeg 的 `bin/` 目录加入系统环境变量。
+
 ## 6. 常见问题解答
 
 ### 6.1 我在 Git 看到了这些文件，是不是已经包含所有代码？
