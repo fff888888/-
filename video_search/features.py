@@ -137,11 +137,29 @@ class OnnxClipEncoder:
             return_tensors="np",
         )
         expected_inputs = [item.name for item in self.text_session.get_inputs()]
-        inputs = {
-            name: tokens[name]
-            for name in expected_inputs
-            if name in tokens
-        }
+
+        def _resolve_alias(name: str) -> str | None:
+            lowered = name.lower()
+            if name in tokens:
+                return name
+            if "mask" in lowered and "attention_mask" in tokens:
+                return "attention_mask"
+            if "token_type" in lowered and "token_type_ids" in tokens:
+                return "token_type_ids"
+            if (
+                ("input" in lowered or "ids" in lowered or "text" in lowered)
+                and "mask" not in lowered
+                and "token_type" not in lowered
+                and "input_ids" in tokens
+            ):
+                return "input_ids"
+            return None
+
+        inputs: dict[str, np.ndarray] = {}
+        for name in expected_inputs:
+            alias = _resolve_alias(name)
+            if alias is not None:
+                inputs[name] = tokens[alias]
         if not inputs:
             raise RuntimeError(
                 "Tokenizer 输出没有匹配到任何文本模型需要的输入，"
