@@ -136,6 +136,8 @@ class OnnxClipEncoder:
             max_length=self.max_length,
             return_tensors="np",
         )
+        # 保证 numpy 数组是独立副本，避免 ONNX Runtime 对底层缓冲区的修改影响 tokenizer cache
+        tokens = {key: np.array(value, copy=True) for key, value in tokens.items()}
         expected_inputs = [item.name for item in self.text_session.get_inputs()]
 
         def _resolve_alias(name: str) -> str | None:
@@ -144,11 +146,17 @@ class OnnxClipEncoder:
                 return name
             if "mask" in lowered and "attention_mask" in tokens:
                 return "attention_mask"
-            if "token_type" in lowered and "token_type_ids" in tokens:
+            if (
+                ("segment" in lowered or "token_type" in lowered)
+                and "token_type_ids" in tokens
+            ):
                 return "token_type_ids"
+            if "position" in lowered and "position_ids" in tokens:
+                return "position_ids"
             if (
                 ("input" in lowered or "ids" in lowered or "text" in lowered)
                 and "mask" not in lowered
+                and "segment" not in lowered
                 and "token_type" not in lowered
                 and "input_ids" in tokens
             ):

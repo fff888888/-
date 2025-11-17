@@ -173,11 +173,11 @@ python scripts/query_index.py "海滩上奔跑的狗" \
 
 脚本会输出一个 JSON 数组，每个元素包含匹配帧的路径与时间戳，便于回放定位。
 
-## 6. 交互式网站（Web UI）
+## 5. 交互式网站（Web UI）
 
 当命令行结果已经可用时，你可以切换到网页界面，直接在浏览器里输入语义词、悬停预览并下载片段。
 
-### 6.1 一键启动脚本（start_web.py）
+### 5.1 一键启动脚本（start_web.py）
 
 如果你按照示例目录放置素材（例如 `workspace/index/faiss.index`、`workspace/index/manifest.json`、`models/clip-vit-b32-vision.onnx`、`models/clip-vit-b32-text.onnx`、`models/tokenizer/`），可以直接运行：
 
@@ -197,7 +197,7 @@ python scripts/start_web.py
 
 默认会监听 `0.0.0.0:8000` 并自动打开浏览器，方便在 Mac、iPad 或其它局域网设备上访问；若不希望自动打开，可加 `--no-browser`。
 
-### 6.2 自定义启动（run_web_app.py）
+### 5.2 自定义启动（run_web_app.py）
 
 ```bash
 python scripts/run_web_app.py data/index/frame.index \
@@ -211,7 +211,7 @@ python scripts/run_web_app.py data/index/frame.index \
 - 默认会自动打开浏览器标签页，如果你计划把脚本做成桌面快捷方式，可新建一个 `.bat`（Windows）或 `.command`（macOS）文件，内容就是上述命令，双击即可启动。
 - 需要 `ffmpeg` 可执行文件以便后台截取片段；若未安装请先按前文说明配置。
 
-### 6.3 页面交互说明
+### 5.3 页面交互说明
 
 1. **顶部搜索框**：输入任意语义词点击“开始搜索”，后台调用同一套 CLIP/CN-CLIP 推理逻辑并检索 FAISS 索引。
 2. **候选卡片**：搜索结果以卡片形式展示，鼠标悬停时视频自动跳到匹配时间点并播放，便于快速预览；移开后自动暂停并回到起始位置。
@@ -222,13 +222,13 @@ python scripts/run_web_app.py data/index/frame.index \
 
 你也可以通过 `--default-top-k` 与 `--preview-duration` 调整默认展示数量与悬停预览的时间窗口，以适配不同素材密度。
 
-## 5. 常见问题解答
+## 6. 常见问题解答
 
-### 5.1 我在 Git 看到了这些文件，是不是已经包含所有代码？
+### 6.1 我在 Git 看到了这些文件，是不是已经包含所有代码？
 
 是的，`video_search/` 与 `scripts/` 目录中就是完整实现。只需克隆或下载本仓库，即可得到与当前环境一致的代码。
 
-### 5.2 苹果电脑能跑吗？
+### 6.2 苹果电脑能跑吗？
 
 可以。macOS 需安装 Homebrew，然后执行：
 
@@ -241,17 +241,17 @@ pip install -r requirements.txt
 
 安装后即可使用脚本。若在 Apple Silicon 上遇到 FAISS 编译问题，可改用 `conda install -c conda-forge faiss-cpu==1.7.4`。
 
-### 5.3 我只下载仓库，不提供模型能用吗？
+### 6.3 我只下载仓库，不提供模型能用吗？
 
 下载仓库后可以直接运行抽帧、元数据与索引脚本，但推理和检索环节必须加载你提供的 ONNX 模型与 tokenizer。仓库仅提供执行逻辑，不包含任何预训练权重。
 
-### 5.4 后续如何扩展？
+### 6.4 后续如何扩展？
 
 - `video_search/features.py` 可扩展其它 ONNX 模型或量化版本
 - `video_search/index.py` 支持替换为 HNSW、Annoy 等其它向量库
 - 可以将 `scripts/` 中的命令行脚本改造成 API 或批量任务调度器
 
-## 6. 快速验证
+## 7. 快速验证
 
 完成依赖安装后，可运行：
 
@@ -261,7 +261,7 @@ python -m compileall video_search scripts
 
 该命令会检查 Python 语法是否正确，确保脚本在当前环境下可被解释执行。
 
-## 7. 下一步建议
+## 8. 下一步建议
 
 1. 准备目标视频并执行 `scripts/process_video.py`
 2. 利用生成的元数据构建索引 `scripts/build_index.py`
