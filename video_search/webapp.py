@@ -1,19 +1,23 @@
-"""FastAPI web界面，提供语义检索、预览和片段下载。"""
+"""FastAPI web界面，提供语义检索、预览、片段下载与素材管理。"""
 
 from __future__ import annotations
 
+import asyncio
 import json
+import shutil
 import subprocess
 import urllib.parse
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
 from .features import OnnxClipEncoder
 from .index import FaissIndexer
+from .pipeline import build_or_update_index, process_video_to_embeddings
 
 
 @dataclass
@@ -30,6 +34,15 @@ class WebAppConfig:
     default_top_k: int = 9
     preview_duration: float = 3.0
     title: str = "视频语义检索"
+    workspace_dir: Optional[Path] = None
+    output_root: Optional[Path] = None
+    upload_dir: Optional[Path] = None
+    processing_method: str = "interval"
+    processing_interval: float = 1.0
+    processing_scene_threshold: float = 30.0
+    processing_batch_size: int = 32
+    processing_image_format: str = "jpg"
+    processing_quality: int = 95
 
 
 class SearchRequest(BaseModel):
@@ -50,21 +63,63 @@ def _resolve_path(path: str | Path) -> Path:
     return candidate.resolve()
 
 
-def _render_template(config: WebAppConfig) -> str:
+def _safe_stem(name: str) -> str:
+    stem = Path(name).stem or "video"
+    cleaned = "".join(ch if ch.isalnum() else "_" for ch in stem)
+    cleaned = cleaned.strip("_")
+    return cleaned or "video"
+
+
+def _save_upload(file: UploadFile, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with destination.open("wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+
+def _render_template(config: WebAppConfig, upload_dir: Optional[Path]) -> str:
     payload = {
         "defaultTopK": config.default_top_k,
         "previewDuration": config.preview_duration,
         "title": config.title,
+        "uploadsEnabled": bool(config.image_model),
+        "uploadDir": str(upload_dir) if upload_dir else "",
     }
     data = json.dumps(payload, ensure_ascii=False)
-    return TEMPLATE.replace("__APP_CONFIG__", data).replace("__APP_TITLE__", config.title)
+    return (
+        TEMPLATE.replace("__APP_CONFIG__", data)
+        .replace("__APP_TITLE__", config.title)
+        .replace("__APP_UPLOAD_TARGET__", str(upload_dir) if upload_dir else "")
+    )
 
 
 def create_app(config: WebAppConfig) -> FastAPI:
     if config.text_model is None:
         raise ValueError("text_model 不能为空，Web UI 需要文本编码模型")
 
-    indexer = FaissIndexer.load(config.index_path, config.manifest_path)
+    index_path = config.index_path.resolve()
+    manifest_path = (
+        Path(config.manifest_path).expanduser()
+        if config.manifest_path
+        else index_path.with_suffix(".json")
+    )
+    workspace_dir = (
+        Path(config.workspace_dir).expanduser()
+        if config.workspace_dir
+        else index_path.parent.parent
+    )
+    output_root = (
+        Path(config.output_root).expanduser()
+        if config.output_root
+        else workspace_dir
+    )
+    upload_dir = (
+        Path(config.upload_dir).expanduser()
+        if config.upload_dir
+        else workspace_dir / "videos"
+    )
+    upload_dir.mkdir(parents=True, exist_ok=True)
+
+    indexer = FaissIndexer.load(index_path, manifest_path)
     encoder = OnnxClipEncoder(
         model_type=config.model_type,
         image_model_path=config.image_model,
@@ -74,10 +129,11 @@ def create_app(config: WebAppConfig) -> FastAPI:
     )
 
     app = FastAPI(title=config.title)
+    processing_lock = asyncio.Lock()
 
     @app.get("/", response_class=HTMLResponse)
     def homepage() -> str:
-        return _render_template(config)
+        return _render_template(config, upload_dir)
 
     @app.post("/api/search")
     def search(request: SearchRequest) -> Dict[str, List[Dict[str, object]]]:
@@ -163,6 +219,73 @@ def create_app(config: WebAppConfig) -> FastAPI:
         }
         return StreamingResponse(iterator(), media_type="video/mp4", headers=headers)
 
+    @app.post("/api/add_video")
+    async def add_video(file: UploadFile = File(...)) -> Dict[str, object]:
+        if not config.image_model:
+            raise HTTPException(status_code=400, detail="服务器未配置图像模型，暂不支持上传处理")
+        if not file.filename:
+            raise HTTPException(status_code=400, detail="请提供视频文件")
+
+        suffix = Path(file.filename).suffix or ".mp4"
+        stem = _safe_stem(file.filename)
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        candidate = upload_dir / f"{stem}_{timestamp}{suffix}"
+        counter = 1
+        while candidate.exists():
+            candidate = upload_dir / f"{stem}_{timestamp}_{counter}{suffix}"
+            counter += 1
+
+        try:
+            _save_upload(file, candidate)
+        except Exception as exc:  # pragma: no cover
+            raise HTTPException(status_code=500, detail=f"保存视频失败: {exc}") from exc
+        finally:
+            file.file.close()
+
+        async with processing_lock:
+            try:
+                result = process_video_to_embeddings(
+                    video_path=candidate,
+                    output_root=output_root,
+                    model_type=config.model_type,
+                    image_model_path=config.image_model,
+                    text_model_path=config.text_model,
+                    tokenizer_path=config.tokenizer_path,
+                    method=config.processing_method,
+                    interval=config.processing_interval,
+                    scene_threshold=config.processing_scene_threshold,
+                    image_format=config.processing_image_format,
+                    quality=config.processing_quality,
+                    batch_size=config.processing_batch_size,
+                    device=config.device,
+                    metadata_path=output_root / "metadata" / f"{candidate.stem}.json",
+                    encoder=encoder,
+                )
+            except Exception as exc:  # pragma: no cover
+                candidate.unlink(missing_ok=True)
+                raise HTTPException(status_code=500, detail=f"处理失败: {exc}") from exc
+
+            try:
+                nonlocal indexer
+                indexer = build_or_update_index(
+                    metadata_paths=[result.metadata_path],
+                    index_path=index_path,
+                    manifest_path=manifest_path,
+                    metric=indexer.metric,
+                    normalize=indexer.normalize,
+                    indexer=indexer,
+                )
+            except Exception as exc:  # pragma: no cover
+                raise HTTPException(status_code=500, detail=f"索引更新失败: {exc}") from exc
+
+        return {
+            "success": True,
+            "message": "处理完成，可以开始检索",
+            "video_path": str(candidate),
+            "metadata_path": str(result.metadata_path),
+            "index_path": str(index_path),
+        }
+
     return app
 
 
@@ -188,6 +311,50 @@ TEMPLATE = """<!DOCTYPE html>
       max-width: 1200px;
       margin: 0 auto;
       padding: 24px 20px 60px;
+    }
+    #upload-section {
+      margin: 24px auto 32px;
+      padding: 20px;
+      border-radius: 18px;
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.12);
+    }
+    #upload-section h2 {
+      margin: 0 0 8px;
+      font-size: 20px;
+    }
+    #upload-form {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: center;
+      margin-top: 12px;
+    }
+    #upload-form input[type="file"] {
+      flex: 1 1 260px;
+      border-radius: 999px;
+      border: 1px solid rgba(255,255,255,0.15);
+      padding: 10px 14px;
+      background: rgba(0,0,0,0.2);
+      color: inherit;
+    }
+    #upload-status {
+      margin-top: 8px;
+      min-height: 20px;
+      color: #c7c7e7;
+      font-size: 14px;
+    }
+    #upload-disabled {
+      margin-top: 12px;
+      color: #ffadad;
+      font-size: 14px;
+    }
+    code.path {
+      padding: 2px 6px;
+      border-radius: 6px;
+      background: rgba(0,0,0,0.35);
+      border: 1px solid rgba(255,255,255,0.1);
+      font-size: 13px;
     }
     header {
       text-align: center;
@@ -355,6 +522,18 @@ TEMPLATE = """<!DOCTYPE html>
       <div id=\"status\"></div>
     </header>
 
+
+    <section id=\"upload-section\">
+      <h2>素材管理 / 视频批量处理</h2>
+      <p class=\"card-meta\">上传 MP4/MOV 等视频，系统会自动抽帧、提取特征并更新索引。保存目录：<code class=\"path\" id=\"upload-target\">__APP_UPLOAD_TARGET__</code></p>
+      <form id=\"upload-form\">
+        <input type=\"file\" id=\"video-input\" accept=\"video/mp4,video/*\" />
+        <button type=\"submit\" class=\"primary\" id=\"upload-button\">上传并处理</button>
+      </form>
+      <div id=\"upload-status\"></div>
+      <div id=\"upload-disabled\" style=\"display:none;\">服务器缺少图像模型，仅可检索已有素材。</div>
+    </section>
+
     <section id=\"results\"></section>
 
     <section id=\"detail-panel\">
@@ -391,6 +570,13 @@ TEMPLATE = """<!DOCTYPE html>
     const resultsEl = document.getElementById('results');
     const statusEl = document.getElementById('status');
     const formEl = document.getElementById('search-form');
+    const uploadForm = document.getElementById('upload-form');
+    const uploadButton = document.getElementById('upload-button');
+    const uploadStatus = document.getElementById('upload-status');
+    const uploadTarget = document.getElementById('upload-target');
+    const uploadDisabled = document.getElementById('upload-disabled');
+    const uploadSection = document.getElementById('upload-section');
+    const videoInput = document.getElementById('video-input');
     const queryInput = document.getElementById('query-input');
     const detailPanel = document.getElementById('detail-panel');
     const detailVideo = document.getElementById('detail-video');
@@ -437,6 +623,51 @@ TEMPLATE = """<!DOCTYPE html>
         button.textContent = '搜索中...';
       } else {
         button.textContent = '开始搜索';
+      }
+    }
+
+    function setUploadProcessing(flag) {
+      if (!uploadButton) return;
+      uploadButton.disabled = flag;
+      uploadButton.textContent = flag ? '处理中...' : '上传并处理';
+    }
+
+    if (uploadSection) {
+      if (!APP_CONFIG.uploadsEnabled) {
+        if (uploadDisabled) uploadDisabled.style.display = 'block';
+        if (uploadForm) uploadForm.style.display = 'none';
+      } else if (uploadForm) {
+        if (uploadTarget && APP_CONFIG.uploadDir) {
+          uploadTarget.textContent = APP_CONFIG.uploadDir;
+        }
+        uploadForm.addEventListener('submit', async (evt) => {
+          evt.preventDefault();
+          if (!videoInput || !videoInput.files || !videoInput.files[0]) {
+            uploadStatus.textContent = '请选择要上传的视频文件';
+            return;
+          }
+          setUploadProcessing(true);
+          uploadStatus.textContent = '正在上传并处理，请稍候...';
+          const formData = new FormData();
+          formData.append('file', videoInput.files[0]);
+          try {
+            const res = await fetch('/api/add_video', {
+              method: 'POST',
+              body: formData,
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok || !data.success) {
+              throw new Error(data.message || data.detail || '处理失败');
+            }
+            const saved = data.video_path ? `（已保存到 ${data.video_path}）` : '';
+            uploadStatus.textContent = (data.message || '处理完成，可以开始检索') + saved;
+            videoInput.value = '';
+          } catch (err) {
+            uploadStatus.textContent = err.message;
+          } finally {
+            setUploadProcessing(false);
+          }
+        });
       }
     }
 

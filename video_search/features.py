@@ -136,13 +136,64 @@ class OnnxClipEncoder:
             max_length=self.max_length,
             return_tensors="np",
         )
-        inputs = {name: value for name, value in tokens.items()}
+        # 保证 numpy 数组是独立副本，避免 ONNX Runtime 对底层缓冲区的修改影响 tokenizer cache
+        tokens = {key: np.array(value, copy=True) for key, value in tokens.items()}
+        expected_inputs = self.describe_text_inputs()
+
+        def _normalize_name(name: str) -> str:
+            """移除诸如":0" 等后缀，简化匹配逻辑。"""
+            if ":" in name:
+                return name.split(":", 1)[0]
+            return name
+
+        def _resolve_alias(name: str) -> str | None:
+            normalized = _normalize_name(name)
+            lowered = normalized.lower()
+            if name in tokens:
+                return name
+            if normalized in tokens:
+                return normalized
+            if "mask" in lowered and "attention_mask" in tokens:
+                return "attention_mask"
+            if (
+                ("segment" in lowered or "token_type" in lowered)
+                and "token_type_ids" in tokens
+            ):
+                return "token_type_ids"
+            if "position" in lowered and "position_ids" in tokens:
+                return "position_ids"
+            if (
+                ("input" in lowered or "ids" in lowered or "text" in lowered)
+                and "mask" not in lowered
+                and "segment" not in lowered
+                and "token_type" not in lowered
+                and "input_ids" in tokens
+            ):
+                return "input_ids"
+            return None
+
+        inputs: dict[str, np.ndarray] = {}
+        for raw_name in expected_inputs:
+            alias = _resolve_alias(raw_name)
+            if alias is not None:
+                inputs[raw_name] = tokens[alias]
+        if not inputs:
+            raise RuntimeError(
+                "Tokenizer 输出没有匹配到任何文本模型需要的输入，"
+                "请检查 ONNX 模型的输入名称"
+            )
         outputs = self.text_session.run(None, inputs)[0]
         embeddings = outputs.astype(np.float32)
         if self.normalize:
             norms = np.linalg.norm(embeddings, axis=1, keepdims=True) + 1e-12
             embeddings = embeddings / norms
         return embeddings
+
+    def describe_text_inputs(self) -> List[str]:
+        """列出文本 ONNX 模型声明的全部输入名称，便于调试。"""
+        if self.text_session is None:
+            return []
+        return [item.name for item in self.text_session.get_inputs()]
 
 
 def build_frame_feature_cache(
