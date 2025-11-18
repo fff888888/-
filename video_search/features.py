@@ -59,13 +59,11 @@ class OnnxClipEncoder:
         if device.lower() == "cuda":
             providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
 
-        self.image_model_path = str(image_model_path) if image_model_path else None
         self.image_session: ort.InferenceSession | None = None
         if image_model_path is not None:
             self.image_session = ort.InferenceSession(
                 str(image_model_path), providers=providers
             )
-        self.text_model_path = str(text_model_path) if text_model_path else None
         self.text_session: ort.InferenceSession | None = None
         if text_model_path is not None:
             self.text_session = ort.InferenceSession(
@@ -74,13 +72,11 @@ class OnnxClipEncoder:
 
         if tokenizer is not None:
             self.tokenizer = tokenizer
-            self.tokenizer_path = tokenizer_path
         else:
             target_path = tokenizer_path or self.config.get("default_tokenizer")
             if target_path is None:
                 raise ValueError("tokenizer_path must be provided when no default is set")
             self.tokenizer = AutoTokenizer.from_pretrained(target_path)
-            self.tokenizer_path = target_path
         self.normalize = normalize
         self.max_length = int(self.config["max_length"])
         self._dimension: int | None = None
