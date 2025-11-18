@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 NORMALIZED_TIMESTAMP_KEYS = (
     "timestamp",
@@ -41,10 +41,13 @@ class FrameRecord:
     timestamp: float
     image_path: str
     embedding_index: Optional[int] = None
+    embedding: Optional[List[float]] = None
     extras: Dict[str, Any] | None = None
 
     def to_dict(self) -> Dict[str, Any]:
         data = asdict(self)
+        if self.embedding is None:
+            data.pop("embedding")
         if self.extras is None:
             data.pop("extras")
         return data
@@ -121,7 +124,12 @@ def load_metadata(path: Path | str) -> VideoMetadata:
     normalized = _normalize_metadata_payload(data, json_path)
     if not normalized.get("video_path"):
         normalized["video_path"] = str(json_path)
-    return VideoMetadata.from_dict(normalized)
+    metadata = VideoMetadata.from_dict(normalized)
+    if metadata.embedding_dim is None:
+        inferred = _infer_embedding_dim(metadata.frames)
+        if inferred is not None:
+            metadata.embedding_dim = inferred
+    return metadata
 
 
 def merge_metadata(records: Iterable[VideoMetadata]) -> List[FrameRecord]:
@@ -170,6 +178,10 @@ def _normalize_metadata_payload(data: Any, source: Path) -> Dict[str, Any]:
             timestamp = _coerce_timestamp(item, idx)
             frame_index = _coerce_index(item, len(frames))
             embedding_index = _coerce_embedding_index(item)
+            embedding = _extract_embedding_vector(item)
+            if embedding_dim is None and embedding is not None:
+                embedding_dim = len(embedding)
+
             extras = _collect_extras(item)
 
             frame_dict: Dict[str, Any] = {
@@ -179,6 +191,8 @@ def _normalize_metadata_payload(data: Any, source: Path) -> Dict[str, Any]:
             }
             if embedding_index is not None:
                 frame_dict["embedding_index"] = embedding_index
+            if embedding is not None:
+                frame_dict["embedding"] = embedding
             if extras:
                 frame_dict["extras"] = extras
             frames.append(frame_dict)
@@ -243,3 +257,32 @@ def _collect_extras(item: Dict[str, Any]) -> Dict[str, Any]:
         if item.get(key) is not None:
             extras[key] = item[key]
     return extras
+
+
+def _extract_embedding_vector(item: Dict[str, Any]) -> Optional[List[float]]:
+    raw = item.get("embedding") or item.get("vector") or item.get("features")
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        if "values" in raw:
+            raw = raw["values"]
+        else:
+            raise ValueError("embedding 字段应为列表或包含 values 的字典")
+    if isinstance(raw, (str, bytes)) or not isinstance(raw, Sequence):
+        raise ValueError("embedding 字段必须是数值列表")
+    vector: List[float] = []
+    for value in raw:
+        try:
+            vector.append(float(value))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("embedding 列表内的值必须可转为 float") from exc
+    if not vector:
+        raise ValueError("embedding 列表不能为空")
+    return vector
+
+
+def _infer_embedding_dim(frames: Sequence[FrameRecord]) -> Optional[int]:
+    for frame in frames:
+        if frame.embedding:
+            return len(frame.embedding)
+    return None

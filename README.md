@@ -151,6 +151,8 @@ python scripts/process_video.py /path/to/video.mp4 \
 
 > 📝 如果你拿到的是一整个帧列表（例如 demo 目录里的 `bicycle_raw.json` 这类 `[{...}, {...}]` 文件），本仓库的 `load_metadata()` 会自
 动把它转换成如上结构，不需要你额外手动整理字段。
+>
+> 这些列表如果缺少 `embedding_dim` 字段，也不用担心 —— 只要每个元素里带有 `embedding`（或 `vector`/`features`）数组，程序就会根据数组长度自动推断维度。
 
 ### 4.3 构建 FAISS 索引
 
@@ -162,6 +164,7 @@ python scripts/build_index.py data/metadata/video.json \
 - 支持一次传入多个元数据文件，实现多视频联合检索
 - 会额外生成 `frame.index.json`，记录索引中每一条向量对应的元数据
 - 如果你使用官方 demo 中按帧列出的 `*_raw.json`（文件内容是一个 JSON 列表），脚本会自动把它们转换成标准格式
+- 若这些 demo JSON 只有 `embedding` 数组而没有 `.npy` 特征文件、`embedding_dim` 字段，脚本会直接读取列表里的 embedding 内容来推断维度并写入 FAISS
 
 示例：把 demo 目录下的所有 `*_raw.json` 写入 `workspace/index`：
 

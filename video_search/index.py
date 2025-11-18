@@ -10,7 +10,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import faiss
 import numpy as np
 
-from .metadata import VideoMetadata, load_metadata
+from .metadata import FrameRecord, VideoMetadata, load_metadata
 
 
 @dataclass
@@ -79,10 +79,14 @@ class FaissIndexer:
         self.frames.extend(frames)
 
     def add_metadata(self, metadata: VideoMetadata, metadata_path: Path | str | None = None) -> None:
-        if metadata.feature_file is None:
-            raise ValueError("Metadata missing feature_file")
-        feature_path = Path(metadata.feature_file)
-        embeddings = np.load(feature_path)
+        embeddings = None
+        if metadata.feature_file is not None:
+            feature_path = Path(metadata.feature_file)
+            embeddings = np.load(feature_path)
+        else:
+            embeddings = _collect_inline_embeddings(metadata.frames)
+        if embeddings is None:
+            raise ValueError("Metadata 缺少 feature_file，且帧记录里也没有 embedding")
         if embeddings.shape[0] != len(metadata.frames):
             raise ValueError("Frame/embedding count mismatch")
         frames = [
@@ -92,7 +96,7 @@ class FaissIndexer:
                 timestamp=frame.timestamp,
                 metadata_path=str(metadata_path) if metadata_path else None,
                 frame_index=frame.index,
-                embedding_index=frame.embedding_index or idx,
+                embedding_index=frame.embedding_index if frame.embedding_index is not None else idx,
             )
             for idx, frame in enumerate(metadata.frames)
         ]
@@ -153,13 +157,51 @@ def build_index_from_metadata(
     if not metadata_paths:
         raise ValueError("metadata_paths cannot be empty")
     first = load_metadata(metadata_paths[0])
-    if first.embedding_dim is None:
-        raise ValueError("metadata must include embedding_dim")
-    indexer = FaissIndexer(dimension=int(first.embedding_dim), metric=metric, normalize=normalize)
+    dimension = _ensure_embedding_dim(first)
+    indexer = FaissIndexer(dimension=dimension, metric=metric, normalize=normalize)
     indexer.add_metadata(first, metadata_paths[0])
     for path in metadata_paths[1:]:
         metadata = load_metadata(path)
-        if metadata.embedding_dim != first.embedding_dim:
+        dim = _ensure_embedding_dim(metadata)
+        if dim != indexer.dimension:
             raise ValueError("All metadata must share the same embedding dimension")
         indexer.add_metadata(metadata, path)
     return indexer
+
+
+def _ensure_embedding_dim(metadata: VideoMetadata) -> int:
+    if metadata.embedding_dim is not None:
+        return int(metadata.embedding_dim)
+    inline_dim = _infer_inline_dimension(metadata.frames)
+    if inline_dim is not None:
+        metadata.embedding_dim = inline_dim
+        return inline_dim
+    if metadata.feature_file is not None:
+        feature_path = Path(metadata.feature_file)
+        array = np.load(feature_path, mmap_mode="r")
+        if array.ndim < 2:
+            raise ValueError("无法从 feature_file 推断 embedding 维度")
+        dim = int(array.shape[1])
+        metadata.embedding_dim = dim
+        return dim
+    raise ValueError("metadata must include embedding_dim or inline embeddings")
+
+
+def _infer_inline_dimension(frames: Sequence[FrameRecord]) -> Optional[int]:
+    for frame in frames:
+        embedding = getattr(frame, "embedding", None)
+        if embedding:
+            return len(embedding)
+    return None
+
+
+def _collect_inline_embeddings(frames: Sequence[FrameRecord]) -> Optional[np.ndarray]:
+    vectors: List[List[float]] = []
+    for frame in frames:
+        embedding = getattr(frame, "embedding", None)
+        if embedding is None:
+            return None
+        vectors.append(list(embedding))
+    if not vectors:
+        return None
+    return np.asarray(vectors, dtype=np.float32)
