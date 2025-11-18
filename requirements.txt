@@ -1,0 +1,9 @@
+opencv-python
+onnxruntime
+transformers
+faiss-cpu
+numpy
+Pillow
+fastapi
+uvicorn
+python-multipart
