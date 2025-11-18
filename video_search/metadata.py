@@ -9,6 +9,19 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 DEFAULT_EMBEDDING_DIM = 512
 
+FEATURE_FILE_KEYS = (
+    "feature_file",
+    "feature_path",
+    "features_file",
+    "features_path",
+    "embedding_file",
+    "embedding_path",
+    "vector_file",
+    "vector_path",
+    "npy_file",
+    "npy_path",
+)
+
 NORMALIZED_TIMESTAMP_KEYS = (
     "timestamp",
     "time",
@@ -203,8 +216,10 @@ def _normalize_metadata_payload(
                         video_path = str(item[key])
                         break
 
-            if feature_file is None and item.get("feature_file"):
-                feature_file = str(item["feature_file"])
+            if feature_file is None:
+                candidate = _pick_first(item, FEATURE_FILE_KEYS)
+                if candidate:
+                    feature_file = candidate
             if embedding_dim is None and item.get("embedding_dim"):
                 try:
                     embedding_dim = int(item["embedding_dim"])
@@ -306,7 +321,15 @@ def _collect_extras(item: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _extract_embedding_vector(item: Dict[str, Any]) -> Optional[List[float]]:
-    raw = item.get("embedding") or item.get("vector") or item.get("features")
+    raw = None
+    for key in EMBEDDING_VECTOR_KEYS:
+        if key in item and item[key] is not None:
+            raw = item[key]
+            # 文本路径类字段通常是字符串，直接跳过让 feature_file 逻辑去处理
+            if isinstance(raw, (str, bytes)):
+                raw = None
+                continue
+            break
     if raw is None:
         return None
     if isinstance(raw, dict):
@@ -342,3 +365,13 @@ def _default_normalized_path(source: Path) -> Path:
         base = source
         suffix = ".json"
     return Path(f"{base}_normalized{suffix}")
+EMBEDDING_VECTOR_KEYS = (
+    "embedding",
+    "vector",
+    "features",
+    "feature",
+    "clip_embedding",
+    "clip_vector",
+    "clip_features",
+)
+

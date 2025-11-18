@@ -165,6 +165,8 @@ python scripts/build_index.py data/metadata/video.json \
 - 会额外生成 `frame.index.json`，记录索引中每一条向量对应的元数据
 - 如果你使用官方 demo 中按帧列出的 `*_raw.json`（文件内容是一个 JSON 列表），脚本会自动把它们转换成标准格式
 - 若这些 demo JSON 只有 `embedding` 数组而没有 `.npy` 特征文件、`embedding_dim` 字段，脚本会直接读取列表里的 embedding 内容来推断维度并写入 FAISS
+- 如果旧式 JSON 仅在元素里写了 `feature_file`/`feature_path`/`embedding_path`/`vector_path` 等字段，也会被自动识别并读取 `.npy` 特征
+  文件；同样地，任何 `embedding`/`vector`/`features`/`feature`/`clip_vector` 数组都会被作为内联向量加入索引。
 
 示例：把 demo 目录下的所有 `*_raw.json` 写入 `workspace/index`：
 
@@ -216,7 +218,7 @@ python scripts/start_web.py
 
 找到即用，找不到就提示报错，并允许通过命令行选项覆盖，例如 `python scripts/start_web.py --index my_index/frame.index --text-model /tmp/clip_text.onnx`。
 
-默认会监听 `0.0.0.0:8000` 并自动打开浏览器，方便在 Mac、iPad 或其它局域网设备上访问；若不希望自动打开，可加 `--no-browser`。如果你更习惯图形化操作，macOS/Windows 可以直接双击仓库根目录的 `start_app.py`，其内部调用的也是 `scripts/start_web.py`。
+默认会监听 `0.0.0.0:8000` 并自动打开浏览器，方便在 Mac、iPad 或其它局域网设备上访问；若不希望自动打开，可加 `--no-browser`。如果你更习惯图形化操作，macOS/Windows 可以直接双击仓库根目录的 `start_app.py`，其内部调用的也是 `scripts/start_web.py`。若命令行提示 `./start_app.py: No such file or directory`，请先 `cd` 到包含 `README.md` 的仓库根目录，再执行 `python start_app.py` 或 `chmod +x start_app.py && ./start_app.py`。
 
 > ⚠️ Web UI 依赖已经构建好的索引与 manifest：先用上一节的 `build_index.py ... --output workspace/index/faiss.index --manifest workspace/index/manifest.json` 构建一次，`start_web.py`/`start_app.py` 才能在默认路径中找到它们；否则脚本会直接提示缺少文件。
 

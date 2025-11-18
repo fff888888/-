@@ -86,7 +86,10 @@ class FaissIndexer:
         else:
             embeddings = _collect_inline_embeddings(metadata.frames)
         if embeddings is None:
-            raise ValueError("Metadata 缺少 feature_file，且帧记录里也没有 embedding")
+            location = metadata_path if metadata_path is not None else metadata.video_path
+            raise ValueError(
+                f"{location}: metadata 缺少 feature_file，且帧记录里也没有 embedding"
+            )
         if embeddings.shape[0] != len(metadata.frames):
             raise ValueError("Frame/embedding count mismatch")
         frames = [
