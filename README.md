@@ -149,6 +149,9 @@ python scripts/process_video.py /path/to/video.mp4 \
 }
 ```
 
+> 📝 如果你拿到的是一整个帧列表（例如 demo 目录里的 `bicycle_raw.json` 这类 `[{...}, {...}]` 文件），本仓库的 `load_metadata()` 会自
+动把它转换成如上结构，不需要你额外手动整理字段。
+
 ### 4.3 构建 FAISS 索引
 
 ```bash
@@ -158,6 +161,21 @@ python scripts/build_index.py data/metadata/video.json \
 
 - 支持一次传入多个元数据文件，实现多视频联合检索
 - 会额外生成 `frame.index.json`，记录索引中每一条向量对应的元数据
+- 如果你使用官方 demo 中按帧列出的 `*_raw.json`（文件内容是一个 JSON 列表），脚本会自动把它们转换成标准格式
+
+示例：把 demo 目录下的所有 `*_raw.json` 写入 `workspace/index`：
+
+```bash
+python scripts/build_index.py \
+  workspace/demo/bicycle_raw.json \
+  workspace/demo/book_raw.json \
+  workspace/demo/building_raw.json \
+  workspace/demo/car_raw.json \
+  workspace/demo/explosion_raw.json \
+  workspace/demo/picnic_raw.json \
+  --output workspace/index/faiss.index \
+  --manifest workspace/index/manifest.json
+```
 
 ### 4.4 文本检索
 
@@ -196,6 +214,8 @@ python scripts/start_web.py
 找到即用，找不到就提示报错，并允许通过命令行选项覆盖，例如 `python scripts/start_web.py --index my_index/frame.index --text-model /tmp/clip_text.onnx`。
 
 默认会监听 `0.0.0.0:8000` 并自动打开浏览器，方便在 Mac、iPad 或其它局域网设备上访问；若不希望自动打开，可加 `--no-browser`。如果你更习惯图形化操作，macOS/Windows 可以直接双击仓库根目录的 `start_app.py`，其内部调用的也是 `scripts/start_web.py`。
+
+> ⚠️ Web UI 依赖已经构建好的索引与 manifest：先用上一节的 `build_index.py ... --output workspace/index/faiss.index --manifest workspace/index/manifest.json` 构建一次，`start_web.py`/`start_app.py` 才能在默认路径中找到它们；否则脚本会直接提示缺少文件。
 
 ### 5.2 自定义启动（run_web_app.py）
 
