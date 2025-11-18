@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+
+DEFAULT_EMBEDDING_DIM = 512
 
 NORMALIZED_TIMESTAMP_KEYS = (
     "timestamp",
@@ -115,13 +117,37 @@ def save_metadata(metadata: VideoMetadata, path: Path | str) -> None:
         json.dump(metadata.to_dict(), fh, indent=2, ensure_ascii=False)
 
 
-def load_metadata(path: Path | str) -> VideoMetadata:
-    """Load :class:`VideoMetadata` from a JSON file."""
+def load_metadata(
+    path: Path | str,
+    *,
+    convert_legacy: bool = True,
+    default_embedding_dim: int = DEFAULT_EMBEDDING_DIM,
+    write_converted: bool = False,
+    converted_path: Path | str | None = None,
+) -> VideoMetadata:
+    """Load :class:`VideoMetadata` from a JSON file.
+
+    Args:
+        path: JSON file to read.
+        convert_legacy: Whether to auto-convert legacy list payloads.
+        default_embedding_dim: Fallback dimension for legacy payloads lacking
+            ``embedding_dim`` information.
+        write_converted: When ``True`` and the input payload is legacy, persist
+            the normalized metadata to ``converted_path`` (or a default
+            ``*_normalized.json`` next to the source file).
+        converted_path: Optional target file for ``write_converted``.
+    """
 
     json_path = Path(path)
     with json_path.open("r", encoding="utf-8") as fh:
         data = json.load(fh)
-    normalized = _normalize_metadata_payload(data, json_path)
+    normalized, was_legacy = _normalize_metadata_payload(
+        data,
+        json_path,
+        default_embedding_dim if convert_legacy else None,
+    )
+    normalized.pop("_legacy_payload", None)
+    normalized.pop("_legacy_assumed_dim", None)
     if not normalized.get("video_path"):
         normalized["video_path"] = str(json_path)
     metadata = VideoMetadata.from_dict(normalized)
@@ -129,6 +155,15 @@ def load_metadata(path: Path | str) -> VideoMetadata:
         inferred = _infer_embedding_dim(metadata.frames)
         if inferred is not None:
             metadata.embedding_dim = inferred
+        elif convert_legacy and was_legacy and default_embedding_dim:
+            metadata.embedding_dim = default_embedding_dim
+    metadata.__dict__["_legacy_payload"] = was_legacy
+    metadata.__dict__["_source_json_path"] = str(json_path)
+
+    if write_converted and was_legacy:
+        target = Path(converted_path) if converted_path else _default_normalized_path(json_path)
+        save_metadata(metadata, target)
+
     return metadata
 
 
@@ -141,17 +176,22 @@ def merge_metadata(records: Iterable[VideoMetadata]) -> List[FrameRecord]:
     return flattened
 
 
-def _normalize_metadata_payload(data: Any, source: Path) -> Dict[str, Any]:
+def _normalize_metadata_payload(
+    data: Any,
+    source: Path,
+    default_embedding_dim: Optional[int],
+) -> Tuple[Dict[str, Any], bool]:
     """Accept both dict-based and list-based metadata payloads."""
 
     if isinstance(data, dict):
-        return dict(data)
+        return dict(data), False
 
     if isinstance(data, list):
         frames: List[Dict[str, Any]] = []
         video_path: Optional[str] = None
         feature_file: Optional[str] = None
         embedding_dim: Optional[int] = None
+        assumed_default = False
 
         for idx, item in enumerate(data):
             if not isinstance(item, dict):
@@ -200,12 +240,18 @@ def _normalize_metadata_payload(data: Any, source: Path) -> Dict[str, Any]:
         if not frames:
             raise ValueError(f"{source}: metadata 列表没有可解析的帧信息")
 
+        if embedding_dim is None and default_embedding_dim is not None:
+            embedding_dim = int(default_embedding_dim)
+            assumed_default = True
+
         normalized: Dict[str, Any] = {"video_path": video_path or str(source), "frames": frames}
         if feature_file:
             normalized["feature_file"] = feature_file
         if embedding_dim is not None:
             normalized["embedding_dim"] = embedding_dim
-        return normalized
+        normalized["_legacy_payload"] = True
+        normalized["_legacy_assumed_dim"] = assumed_default
+        return normalized, True
 
     raise TypeError(f"{source}: 不支持的 metadata 格式 {type(data)!r}")
 
@@ -286,3 +332,13 @@ def _infer_embedding_dim(frames: Sequence[FrameRecord]) -> Optional[int]:
         if frame.embedding:
             return len(frame.embedding)
     return None
+
+
+def _default_normalized_path(source: Path) -> Path:
+    if source.suffix:
+        base = source.with_suffix("")
+        suffix = source.suffix
+    else:
+        base = source
+        suffix = ".json"
+    return Path(f"{base}_normalized{suffix}")

@@ -10,7 +10,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import faiss
 import numpy as np
 
-from .metadata import FrameRecord, VideoMetadata, load_metadata
+from .metadata import DEFAULT_EMBEDDING_DIM, FrameRecord, VideoMetadata, load_metadata
 
 
 @dataclass
@@ -153,15 +153,26 @@ def build_index_from_metadata(
     metadata_paths: Sequence[Path | str],
     metric: str = "ip",
     normalize: bool = True,
+    *,
+    default_embedding_dim: int = DEFAULT_EMBEDDING_DIM,
+    convert_legacy: bool = True,
 ) -> FaissIndexer:
     if not metadata_paths:
         raise ValueError("metadata_paths cannot be empty")
-    first = load_metadata(metadata_paths[0])
+    first = load_metadata(
+        metadata_paths[0],
+        convert_legacy=convert_legacy,
+        default_embedding_dim=default_embedding_dim,
+    )
     dimension = _ensure_embedding_dim(first)
     indexer = FaissIndexer(dimension=dimension, metric=metric, normalize=normalize)
     indexer.add_metadata(first, metadata_paths[0])
     for path in metadata_paths[1:]:
-        metadata = load_metadata(path)
+        metadata = load_metadata(
+            path,
+            convert_legacy=convert_legacy,
+            default_embedding_dim=default_embedding_dim,
+        )
         dim = _ensure_embedding_dim(metadata)
         if dim != indexer.dimension:
             raise ValueError("All metadata must share the same embedding dimension")

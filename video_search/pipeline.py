@@ -9,7 +9,7 @@ from typing import Sequence
 from .features import OnnxClipEncoder, build_frame_feature_cache
 from .frames import extract_keyframes
 from .index import FaissIndexer, build_index_from_metadata
-from .metadata import VideoMetadata, save_metadata, load_metadata
+from .metadata import DEFAULT_EMBEDDING_DIM, VideoMetadata, save_metadata, load_metadata
 
 
 @dataclass
@@ -115,6 +115,10 @@ def build_or_update_index(
     normalize: bool = True,
     indexer: FaissIndexer | None = None,
     reset: bool = False,
+    default_embedding_dim: int = DEFAULT_EMBEDDING_DIM,
+    convert_legacy: bool = True,
+    write_converted: bool = False,
+    converted_dir: Path | str | None = None,
 ) -> FaissIndexer:
     """Create a brand-new index or append new metadata into an existing one."""
 
@@ -130,6 +134,8 @@ def build_or_update_index(
             metadata_paths=resolved_metadata,
             metric=metric,
             normalize=normalize,
+            default_embedding_dim=default_embedding_dim,
+            convert_legacy=convert_legacy,
         )
         indexer.save(index_path, manifest)
         return indexer
@@ -142,12 +148,20 @@ def build_or_update_index(
                 metadata_paths=resolved_metadata,
                 metric=metric,
                 normalize=normalize,
+                default_embedding_dim=default_embedding_dim,
+                convert_legacy=convert_legacy,
             )
             indexer.save(index_path, manifest)
             return indexer
 
     for path in resolved_metadata:
-        metadata = load_metadata(path)
+        metadata = load_metadata(
+            path,
+            convert_legacy=convert_legacy,
+            default_embedding_dim=default_embedding_dim,
+            write_converted=write_converted,
+            converted_path=_converted_metadata_path(path, converted_dir) if write_converted else None,
+        )
         if metadata.embedding_dim is None:
             raise ValueError(f"metadata 缺少 embedding_dim: {path}")
         if metadata.embedding_dim != indexer.dimension:
@@ -158,3 +172,14 @@ def build_or_update_index(
 
     indexer.save(index_path, manifest)
     return indexer
+
+
+def _converted_metadata_path(source: Path | str, converted_dir: Path | str | None) -> Path:
+    source_path = Path(source)
+    if converted_dir:
+        target_dir = Path(converted_dir)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        return target_dir / source_path.name
+    if source_path.suffix:
+        return source_path.with_name(f"{source_path.stem}_normalized{source_path.suffix}")
+    return source_path.with_name(f"{source_path.name}_normalized.json")
