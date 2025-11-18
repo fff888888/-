@@ -5,15 +5,10 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Iterable, List
 
-from video_search.features import OnnxClipEncoder
-from video_search.metadata import load_metadata, save_metadata
-from video_search.pipeline import (
-    build_or_update_index,
-    ensure_metadata_embeddings,
-    metadata_has_embeddings,
-)
+from video_search.metadata import load_metadata
+from video_search.pipeline import build_or_update_index
 
 
 def parse_args() -> argparse.Namespace:
@@ -63,60 +58,13 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip writing normalized JSON copies for legacy metadata",
     )
-    parser.add_argument(
-        "--model-type",
-        choices=["clip", "cnclip"],
-        help="模型类别（clip/cnclip），用于 legacy metadata 生成缺失的 embedding",
-    )
-    parser.add_argument(
-        "--image-model",
-        type=Path,
-        help="图像 ONNX 模型路径，用于 legacy metadata 自动生成 embedding",
-    )
-    parser.add_argument(
-        "--text-model",
-        type=Path,
-        help="（可选）文本 ONNX 模型路径，会记录到规范化 JSON 中",
-    )
-    parser.add_argument(
-        "--tokenizer",
-        type=str,
-        help="（可选）tokenizer 名称/路径，记录到规范化 JSON 中",
-    )
-    parser.add_argument(
-        "--device",
-        default="cpu",
-        help="生成 legacy embedding 时使用的设备（cpu/cuda）",
-    )
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=32,
-        help="生成 legacy embedding 时的 batch size",
-    )
-    parser.add_argument(
-        "--legacy-feature-root",
-        type=Path,
-        default=Path("workspace/embeddings/legacy"),
-        help="保存 legacy metadata 生成的 frame_features.npy 的根目录",
-    )
-    parser.add_argument(
-        "--legacy-inline",
-        action="store_true",
-        help="生成 embedding 时同时写入逐帧 inline 数据（默认为仅保存 .npy）",
-    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     normalized_dir = None if args.no_legacy_export else args.normalized_dir
-    metadata_inputs = _prepare_metadata_paths(
-        args.metadata,
-        normalized_dir,
-        default_dim=args.default_dim,
-        encoder_args=args,
-    )
+    metadata_inputs = _prepare_metadata_paths(args.metadata, normalized_dir)
     build_or_update_index(
         metadata_paths=metadata_inputs,
         index_path=args.output,
@@ -130,66 +78,23 @@ def main() -> None:
     print(f"Index saved to {args.output}")
 
 
-def _prepare_metadata_paths(
-    paths: Iterable[Path],
-    normalized_dir: Path | None,
-    *,
-    default_dim: int,
-    encoder_args: argparse.Namespace,
-) -> List[Path]:
+def _prepare_metadata_paths(paths: Iterable[Path], normalized_dir: Path | None) -> List[Path]:
     resolved: List[Path] = []
     if normalized_dir is not None:
         normalized_dir.mkdir(parents=True, exist_ok=True)
-    encoder: Optional[OnnxClipEncoder] = None
     for source in paths:
         source = Path(source)
-        metadata = load_metadata(
-            source,
-            convert_legacy=True,
-            default_embedding_dim=default_dim,
-        )
-        target = source
-        metadata_changed = False
-        if normalized_dir is not None and getattr(metadata, "_legacy_payload", False):
-            target = normalized_dir / source.name
-
-        if not metadata_has_embeddings(metadata, source):
-            encoder = encoder or _build_legacy_encoder(encoder_args)
-            ensure_metadata_embeddings(
-                metadata,
-                metadata_path=source,
-                encoder=encoder,
-                batch_size=encoder_args.batch_size,
-                feature_root=encoder_args.legacy_feature_root,
-                store_inline=encoder_args.legacy_inline,
-            )
-            metadata_changed = True
-
-        if target != source or metadata_changed:
-            save_metadata(metadata, target)
-            if target != source:
-                print(f"已将 legacy metadata {source} 转换为 {target}")
-            elif metadata_changed:
-                print(f"已在 {source} 写入自动生成的 embedding 信息")
-        resolved.append(target)
+        if normalized_dir is None:
+            resolved.append(source)
+            continue
+        target = normalized_dir / source.name
+        metadata = load_metadata(source, write_converted=True, converted_path=target)
+        if getattr(metadata, "_legacy_payload", False):
+            print(f"已将 legacy metadata {source} 转换为 {target}")
+            resolved.append(target)
+        else:
+            resolved.append(source)
     return resolved
-
-
-def _build_legacy_encoder(args: argparse.Namespace) -> OnnxClipEncoder:
-    if args.image_model is None:
-        raise ValueError(
-            "legacy metadata 缺少 embedding，需要通过 --image-model/--model-type 提供 ONNX 模型"
-        )
-    if args.model_type is None:
-        raise ValueError("请通过 --model-type 指定 clip 或 cnclip，用于生成 legacy embedding")
-    encoder = OnnxClipEncoder(
-        model_type=args.model_type,
-        image_model_path=args.image_model,
-        text_model_path=args.text_model,
-        tokenizer_path=args.tokenizer,
-        device=args.device,
-    )
-    return encoder
 
 
 if __name__ == "__main__":
