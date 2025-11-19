@@ -1,0 +1,11 @@
+opencv-python
+onnxruntime
+transformers
+faiss-cpu
+numpy
+Pillow
+fastapi
+uvicorn
+python-multipart
+torch
+git+https://github.com/openai/CLIP.git
