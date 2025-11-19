@@ -7,5 +7,3 @@ Pillow
 fastapi
 uvicorn
 python-multipart
-torch
-git+https://github.com/openai/CLIP.git

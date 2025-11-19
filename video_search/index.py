@@ -5,22 +5,12 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple, TYPE_CHECKING
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import faiss
 import numpy as np
 
-from .embeddings import ensure_metadata_embeddings, metadata_has_embeddings
-from .metadata import (
-    DEFAULT_EMBEDDING_DIM,
-    FrameRecord,
-    VideoMetadata,
-    load_metadata,
-    save_metadata,
-)
-
-if TYPE_CHECKING:  # pragma: no cover - import for type checking only
-    from .features import OnnxClipEncoder
+from .metadata import DEFAULT_EMBEDDING_DIM, FrameRecord, VideoMetadata, load_metadata
 
 
 @dataclass
@@ -169,43 +159,22 @@ def build_index_from_metadata(
     *,
     default_embedding_dim: int = DEFAULT_EMBEDDING_DIM,
     convert_legacy: bool = True,
-    legacy_encoder: "OnnxClipEncoder | None" = None,
-    legacy_batch_size: int = 32,
-    legacy_feature_root: Path | str | None = None,
-    legacy_store_inline: bool = False,
 ) -> FaissIndexer:
     if not metadata_paths:
         raise ValueError("metadata_paths cannot be empty")
-    resolved = [Path(item) for item in metadata_paths]
     first = load_metadata(
-        resolved[0],
+        metadata_paths[0],
         convert_legacy=convert_legacy,
         default_embedding_dim=default_embedding_dim,
     )
-    _ensure_metadata_vectors(
-        first,
-        resolved[0],
-        legacy_encoder=legacy_encoder,
-        legacy_batch_size=legacy_batch_size,
-        legacy_feature_root=legacy_feature_root,
-        legacy_store_inline=legacy_store_inline,
-    )
     dimension = _ensure_embedding_dim(first)
     indexer = FaissIndexer(dimension=dimension, metric=metric, normalize=normalize)
-    indexer.add_metadata(first, resolved[0])
-    for path in resolved[1:]:
+    indexer.add_metadata(first, metadata_paths[0])
+    for path in metadata_paths[1:]:
         metadata = load_metadata(
             path,
             convert_legacy=convert_legacy,
             default_embedding_dim=default_embedding_dim,
-        )
-        _ensure_metadata_vectors(
-            metadata,
-            path,
-            legacy_encoder=legacy_encoder,
-            legacy_batch_size=legacy_batch_size,
-            legacy_feature_root=legacy_feature_root,
-            legacy_store_inline=legacy_store_inline,
         )
         dim = _ensure_embedding_dim(metadata)
         if dim != indexer.dimension:
@@ -250,29 +219,3 @@ def _collect_inline_embeddings(frames: Sequence[FrameRecord]) -> Optional[np.nda
     if not vectors:
         return None
     return np.asarray(vectors, dtype=np.float32)
-
-
-def _ensure_metadata_vectors(
-    metadata: VideoMetadata,
-    metadata_path: Path,
-    *,
-    legacy_encoder: "OnnxClipEncoder | None",
-    legacy_batch_size: int,
-    legacy_feature_root: Path | str | None,
-    legacy_store_inline: bool,
-) -> None:
-    if metadata_has_embeddings(metadata, metadata_path):
-        return
-    if legacy_encoder is None:
-        raise ValueError(
-            f"{metadata_path}: metadata 缺少 embedding，请提供 --model-type/--image-model 以便自动补算"
-        )
-    ensure_metadata_embeddings(
-        metadata,
-        metadata_path=metadata_path,
-        encoder=legacy_encoder,
-        batch_size=legacy_batch_size,
-        feature_root=legacy_feature_root,
-        store_inline=legacy_store_inline,
-    )
-    save_metadata(metadata, metadata_path)
