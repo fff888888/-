@@ -119,10 +119,6 @@ def build_or_update_index(
     convert_legacy: bool = True,
     write_converted: bool = False,
     converted_dir: Path | str | None = None,
-    legacy_encoder: OnnxClipEncoder | None = None,
-    legacy_batch_size: int = 32,
-    legacy_feature_root: Path | str | None = None,
-    legacy_store_inline: bool = False,
 ) -> FaissIndexer:
     """Create a brand-new index or append new metadata into an existing one."""
 
@@ -132,16 +128,6 @@ def build_or_update_index(
     resolved_metadata = [Path(item) for item in metadata_paths]
     index_path = Path(index_path)
     manifest = Path(manifest_path) if manifest_path else index_path.with_suffix(".json")
-
-    _ensure_paths_have_embeddings(
-        resolved_metadata,
-        convert_legacy=convert_legacy,
-        default_embedding_dim=default_embedding_dim,
-        legacy_encoder=legacy_encoder,
-        legacy_batch_size=legacy_batch_size,
-        legacy_feature_root=legacy_feature_root,
-        legacy_store_inline=legacy_store_inline,
-    )
 
     if reset:
         indexer = build_index_from_metadata(
@@ -176,20 +162,6 @@ def build_or_update_index(
             write_converted=write_converted,
             converted_path=_converted_metadata_path(path, converted_dir) if write_converted else None,
         )
-        if not metadata_has_embeddings(metadata, path):
-            if legacy_encoder is None:
-                raise ValueError(
-                    f"{path}: metadata 缺少 embedding，请在 build_index.py 中提供 --model-type/--image-model 以便自动补算"
-                )
-            ensure_metadata_embeddings(
-                metadata,
-                metadata_path=path,
-                encoder=legacy_encoder,
-                batch_size=legacy_batch_size,
-                feature_root=legacy_feature_root,
-                store_inline=legacy_store_inline,
-            )
-            save_metadata(metadata, path)
         if metadata.embedding_dim is None:
             raise ValueError(f"metadata 缺少 embedding_dim: {path}")
         if metadata.embedding_dim != indexer.dimension:
@@ -202,41 +174,6 @@ def build_or_update_index(
     return indexer
 
 
-def _ensure_paths_have_embeddings(
-    metadata_paths: Sequence[Path],
-    *,
-    convert_legacy: bool,
-    default_embedding_dim: int,
-    legacy_encoder: OnnxClipEncoder | None,
-    legacy_batch_size: int,
-    legacy_feature_root: Path | str | None,
-    legacy_store_inline: bool,
-) -> None:
-    """确保磁盘上的 metadata 已携带可用的 embedding."""
-
-    for path in metadata_paths:
-        metadata = load_metadata(
-            path,
-            convert_legacy=convert_legacy,
-            default_embedding_dim=default_embedding_dim,
-        )
-        if metadata_has_embeddings(metadata, path):
-            continue
-        if legacy_encoder is None:
-            raise ValueError(
-                f"{path}: metadata 缺少 embedding，请通过 --image-model/--model-type 让工具生成向量"
-            )
-        ensure_metadata_embeddings(
-            metadata,
-            metadata_path=path,
-            encoder=legacy_encoder,
-            batch_size=legacy_batch_size,
-            feature_root=legacy_feature_root,
-            store_inline=legacy_store_inline,
-        )
-        save_metadata(metadata, path)
-
-
 def _converted_metadata_path(source: Path | str, converted_dir: Path | str | None) -> Path:
     source_path = Path(source)
     if converted_dir:
@@ -246,115 +183,3 @@ def _converted_metadata_path(source: Path | str, converted_dir: Path | str | Non
     if source_path.suffix:
         return source_path.with_name(f"{source_path.stem}_normalized{source_path.suffix}")
     return source_path.with_name(f"{source_path.name}_normalized.json")
-
-
-def metadata_has_embeddings(metadata: VideoMetadata, metadata_path: Path | str | None = None) -> bool:
-    """Check whether metadata already references usable embeddings."""
-
-    feature_path = _resolve_feature_file(metadata, metadata_path)
-    if feature_path is not None and feature_path.exists():
-        metadata.feature_file = str(feature_path)
-        return True
-    frames = metadata.frames
-    if not frames:
-        return False
-    for frame in frames:
-        if frame.embedding is None:
-            return False
-    return True
-
-
-def ensure_metadata_embeddings(
-    metadata: VideoMetadata,
-    metadata_path: Path | str,
-    *,
-    encoder: OnnxClipEncoder,
-    batch_size: int = 32,
-    feature_root: Path | str | None = None,
-    store_inline: bool = False,
-) -> Path:
-    """Generate embeddings + feature_file for metadata lacking vectors."""
-
-    metadata_file = Path(metadata_path)
-    if metadata_has_embeddings(metadata, metadata_file):
-        feature = metadata.feature_file
-        return Path(feature) if feature else metadata_file
-
-    if not metadata.frames:
-        raise ValueError(f"{metadata_path}: metadata 没有任何帧记录，无法生成 embedding")
-
-    _resolve_frame_image_paths(metadata, metadata_file)
-    root = Path(feature_root) if feature_root else metadata_file.parent / "embeddings"
-    video_name = _determine_video_name(metadata, metadata_file)
-    feature_path = root / encoder.model_type / video_name / "frame_features.npy"
-    cache = build_frame_feature_cache(
-        frames=metadata.frames,
-        encoder=encoder,
-        output_path=feature_path,
-        batch_size=batch_size,
-    )
-
-    metadata.frames = cache.frames
-    metadata.feature_file = str(feature_path)
-    metadata.embedding_dim = int(cache.features.shape[1]) if cache.features.size else encoder.dimension
-    metadata.model_type = metadata.model_type or encoder.model_type
-    if metadata.image_model_path is None:
-        metadata.image_model_path = encoder.image_model_path
-    if metadata.text_model_path is None:
-        metadata.text_model_path = encoder.text_model_path
-    if metadata.tokenizer_path is None:
-        metadata.tokenizer_path = encoder.tokenizer_path
-
-    if store_inline:
-        vectors = cache.features.tolist()
-        for idx, frame in enumerate(metadata.frames):
-            frame.embedding = vectors[idx]
-    else:
-        for frame in metadata.frames:
-            frame.embedding = None
-
-    return feature_path
-
-
-def _resolve_frame_image_paths(metadata: VideoMetadata, metadata_file: Path) -> None:
-    base = metadata_file.parent
-    for frame in metadata.frames:
-        candidate = _resolve_path(frame.image_path, base)
-        if candidate is None:
-            raise FileNotFoundError(
-                f"{metadata_file}: 找不到帧图像 {frame.image_path}，请检查路径是否存在"
-            )
-        frame.image_path = str(candidate)
-
-
-def _resolve_feature_file(metadata: VideoMetadata, metadata_path: Path | str | None) -> Path | None:
-    if not metadata.feature_file:
-        return None
-    feature = Path(metadata.feature_file)
-    if feature.exists():
-        return feature
-    if metadata_path is None:
-        return feature if feature.exists() else None
-    candidate = Path(metadata_path).parent / metadata.feature_file
-    if candidate.exists():
-        return candidate
-    return None
-
-
-def _determine_video_name(metadata: VideoMetadata, metadata_file: Path) -> str:
-    raw = metadata.video_path
-    if raw:
-        return Path(raw).stem
-    return metadata_file.stem
-
-
-def _resolve_path(value: str | None, base: Path) -> Path | None:
-    if not value:
-        return None
-    path = Path(value)
-    if path.exists():
-        return path
-    candidate = base / value
-    if candidate.exists():
-        return candidate
-    return None
