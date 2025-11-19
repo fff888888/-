@@ -16,9 +16,8 @@
 2. **准备运行环境**：创建 Python 虚拟环境，执行 `pip install -r requirements.txt` 安装依赖；macOS 用户额外用 Homebrew 安装 `ffmpeg` 与 `opencv`。
 3. **下载模型权重**：准备 CLIP 或 CN-CLIP 的图像/文本 ONNX 文件以及对应 tokenizer 名称，并记住它们的路径。
 4. **处理你的视频**：运行 `python scripts/process_video.py <视频路径> --image-model <图像模型.onnx> --text-model <文本模型.onnx> --tokenizer <tokenizer>`，脚本会自动抽帧、生成特征与元数据。
-5. **迁移旧版 metadata（如 *_raw.json）**：如果你拿到的是 demo 那种只有帧列表、没有 `.npy` 的 JSON，先运行 `python scripts/migrate_metadata.py bicycle_raw.json ... --model-type clip --image-model models/clip-vit-b32-vision.onnx`，脚本会自动生成缺失的 embedding 并把规范化 JSON 写到 `workspace/metadata/normalized/`。
-6. **构建索引并查询**：执行 `python scripts/build_index.py <规范化 metadata.json>` 生成向量索引，再用 `python scripts/query_index.py "你的文本描述" ...` 检索最相似的帧与时间戳。
-7. **图形化使用界面**：若你沿用本仓库推荐的 `workspace/` 或 `data/` 目录结构，可直接执行 `python scripts/start_web.py` 自动寻找索引与模型；macOS/Windows 用户也可以双击仓库根目录的 `start_app.py` 达到同样效果。需要自定义路径时，则使用 `python scripts/run_web_app.py data/index/frame.index --text-model /path/to/text.onnx --tokenizer openai/clip-vit-base-patch32` 明确传参。
+5. **构建索引并查询**：执行 `python scripts/build_index.py <metadata.json>` 生成向量索引，再用 `python scripts/query_index.py "你的文本描述" ...` 检索最相似的帧和时间戳。
+6. **图形化使用界面**：若你沿用本仓库推荐的 `workspace/` 或 `data/` 目录结构，可直接执行 `python scripts/start_web.py` 自动寻找索引与模型；macOS/Windows 用户也可以双击仓库根目录的 `start_app.py` 达到同样效果。需要自定义路径时，则使用 `python scripts/run_web_app.py data/index/frame.index --text-model /path/to/text.onnx --tokenizer openai/clip-vit-base-patch32` 明确传参。
 
 下面的章节会对每个步骤做更详细的解释与可选项介绍，你可以根据需要深入阅读。
 
@@ -73,7 +72,6 @@ scripts/
   query_index.py         # 载入索引并执行文本检索
   run_web_app.py         # 启动交互式网站，完成搜索、预览与片段下载
   start_web.py           # 自动推断路径后一键启动 Web UI
-  start_app.py           # macOS/Windows 可直接双击运行 Web UI
 video_search/
   frames.py              # 抽帧工具函数
   features.py            # CLIP/CN-CLIP ONNX 推理封装
@@ -90,9 +88,6 @@ data/
   embeddings/<模型>/<视频名称>/frame_features.npy
   metadata/<视频名称>.json
   index/frame.index 与 frame.index.json
-workspace/
-  metadata/normalized/*.json   # legacy *_raw.json 自动转换后的结果
-  embeddings/legacy/<模型>/<文件>/frame_features.npy
 ```
 
 ## 4. 使用流程
@@ -161,39 +156,31 @@ python scripts/process_video.py /path/to/video.mp4 \
 
 ### 4.3 构建 FAISS 索引
 
-#### 4.3.1 旧式 metadata 一次性迁移
-
 ```bash
-python scripts/migrate_metadata.py \
-  bicycle_raw.json book_raw.json building_raw.json \
-  --model-type clip \
-  --image-model models/clip-vit-b32-vision.onnx \
-  --text-model models/clip-vit-b32-text.onnx \
-  --tokenizer openai/clip-vit-base-patch32
-```
-
-- 会把所有 legacy `*_raw.json` 转成 `workspace/metadata/normalized/<同名>.json`
-- 若 JSON 里缺少 `.npy` 或逐帧 embedding，会自动载入 ONNX 模型生成向量，并把 `.npy` 缓存在 `workspace/embeddings/legacy/<模型>/<文件>/frame_features.npy`
-- 默认保留 `.npy` 路径即可满足后续索引流程；若想在 JSON 中直接查看每帧向量，可追加 `--inline`
-- 目标 JSON 已存在时，脚本会提示“跳过”；如需覆盖则添加 `--overwrite`
-
-#### 4.3.2 使用规范化 JSON 构建索引
-
-```bash
-python scripts/build_index.py \
-  workspace/metadata/normalized/bicycle_raw.json \
-  workspace/metadata/normalized/book_raw.json \
-  --output workspace/index/frame.index \
-  --manifest workspace/index/manifest.json
+python scripts/build_index.py data/metadata/video.json \
+  --output data/index/frame.index
 ```
 
 - 支持一次传入多个元数据文件，实现多视频联合检索
 - 会额外生成 `frame.index.json`，记录索引中每一条向量对应的元数据
-- 如果命令里没有写 `--image-model`/`--text-model`/`--tokenizer`，脚本会尝试在 `models/clip-vit-b32-vision.onnx`、`models/clip-vit-b32-text.onnx`、`models/tokenizer/` 等常见目录下自动寻找；三者都找不到时会立即中断并提示需要补齐参数
-- 在将向量写入 FAISS 前，脚本会重新加载 JSON 并校验 `feature_file`/inline embedding 是否存在，如有缺失会直接报错提示重新运行 `scripts/migrate_metadata.py`
-- 只要所有 JSON 都完成迁移，`video_search.index.add_metadata` 就不再抛出 “metadata 缺少 feature_file” 之类的异常
+- 如果你使用官方 demo 中按帧列出的 `*_raw.json`（文件内容是一个 JSON 列表），脚本会自动把它们转换成标准格式
+- 若这些 demo JSON 只有 `embedding` 数组而没有 `.npy` 特征文件、`embedding_dim` 字段，脚本会直接读取列表里的 embedding 内容来推断维度并写入 FAISS
+- 如果旧式 JSON 仅在元素里写了 `feature_file`/`feature_path`/`embedding_path`/`vector_path` 等字段，也会被自动识别并读取 `.npy` 特征
+  文件；同样地，任何 `embedding`/`vector`/`features`/`feature`/`clip_vector` 数组都会被作为内联向量加入索引。
 
-> 💡如果你是增量更新（例如重新处理了少量视频），可以只将这些新增 metadata 传给 `build_index.py`，索引会在原有基础上附加新向量。
+示例：把 demo 目录下的所有 `*_raw.json` 写入 `workspace/index`：
+
+```bash
+python scripts/build_index.py \
+  workspace/demo/bicycle_raw.json \
+  workspace/demo/book_raw.json \
+  workspace/demo/building_raw.json \
+  workspace/demo/car_raw.json \
+  workspace/demo/explosion_raw.json \
+  workspace/demo/picnic_raw.json \
+  --output workspace/index/faiss.index \
+  --manifest workspace/index/manifest.json
+```
 
 ### 4.4 文本检索
 
