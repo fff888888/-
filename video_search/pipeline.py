@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
-from .embeddings import ensure_metadata_embeddings, metadata_has_embeddings
 from .features import OnnxClipEncoder, build_frame_feature_cache
 from .frames import extract_keyframes
 from .index import FaissIndexer, build_index_from_metadata
@@ -120,10 +119,6 @@ def build_or_update_index(
     convert_legacy: bool = True,
     write_converted: bool = False,
     converted_dir: Path | str | None = None,
-    legacy_encoder: OnnxClipEncoder | None = None,
-    legacy_batch_size: int = 32,
-    legacy_feature_root: Path | str | None = None,
-    legacy_store_inline: bool = False,
 ) -> FaissIndexer:
     """Create a brand-new index or append new metadata into an existing one."""
 
@@ -134,16 +129,6 @@ def build_or_update_index(
     index_path = Path(index_path)
     manifest = Path(manifest_path) if manifest_path else index_path.with_suffix(".json")
 
-    _ensure_paths_have_embeddings(
-        resolved_metadata,
-        convert_legacy=convert_legacy,
-        default_embedding_dim=default_embedding_dim,
-        legacy_encoder=legacy_encoder,
-        legacy_batch_size=legacy_batch_size,
-        legacy_feature_root=legacy_feature_root,
-        legacy_store_inline=legacy_store_inline,
-    )
-
     if reset:
         indexer = build_index_from_metadata(
             metadata_paths=resolved_metadata,
@@ -151,10 +136,6 @@ def build_or_update_index(
             normalize=normalize,
             default_embedding_dim=default_embedding_dim,
             convert_legacy=convert_legacy,
-            legacy_encoder=legacy_encoder,
-            legacy_batch_size=legacy_batch_size,
-            legacy_feature_root=legacy_feature_root,
-            legacy_store_inline=legacy_store_inline,
         )
         indexer.save(index_path, manifest)
         return indexer
@@ -169,10 +150,6 @@ def build_or_update_index(
                 normalize=normalize,
                 default_embedding_dim=default_embedding_dim,
                 convert_legacy=convert_legacy,
-                legacy_encoder=legacy_encoder,
-                legacy_batch_size=legacy_batch_size,
-                legacy_feature_root=legacy_feature_root,
-                legacy_store_inline=legacy_store_inline,
             )
             indexer.save(index_path, manifest)
             return indexer
@@ -185,20 +162,6 @@ def build_or_update_index(
             write_converted=write_converted,
             converted_path=_converted_metadata_path(path, converted_dir) if write_converted else None,
         )
-        if not metadata_has_embeddings(metadata, path):
-            if legacy_encoder is None:
-                raise ValueError(
-                    f"{path}: metadata 缺少 embedding，请在 build_index.py 中提供 --model-type/--image-model 以便自动补算"
-                )
-            ensure_metadata_embeddings(
-                metadata,
-                metadata_path=path,
-                encoder=legacy_encoder,
-                batch_size=legacy_batch_size,
-                feature_root=legacy_feature_root,
-                store_inline=legacy_store_inline,
-            )
-            save_metadata(metadata, path)
         if metadata.embedding_dim is None:
             raise ValueError(f"metadata 缺少 embedding_dim: {path}")
         if metadata.embedding_dim != indexer.dimension:
@@ -211,41 +174,6 @@ def build_or_update_index(
     return indexer
 
 
-def _ensure_paths_have_embeddings(
-    metadata_paths: Sequence[Path],
-    *,
-    convert_legacy: bool,
-    default_embedding_dim: int,
-    legacy_encoder: OnnxClipEncoder | None,
-    legacy_batch_size: int,
-    legacy_feature_root: Path | str | None,
-    legacy_store_inline: bool,
-) -> None:
-    """确保磁盘上的 metadata 已携带可用的 embedding."""
-
-    for path in metadata_paths:
-        metadata = load_metadata(
-            path,
-            convert_legacy=convert_legacy,
-            default_embedding_dim=default_embedding_dim,
-        )
-        if metadata_has_embeddings(metadata, path):
-            continue
-        if legacy_encoder is None:
-            raise ValueError(
-                f"{path}: metadata 缺少 embedding，请通过 --image-model/--model-type 让工具生成向量"
-            )
-        ensure_metadata_embeddings(
-            metadata,
-            metadata_path=path,
-            encoder=legacy_encoder,
-            batch_size=legacy_batch_size,
-            feature_root=legacy_feature_root,
-            store_inline=legacy_store_inline,
-        )
-        save_metadata(metadata, path)
-
-
 def _converted_metadata_path(source: Path | str, converted_dir: Path | str | None) -> Path:
     source_path = Path(source)
     if converted_dir:
@@ -255,5 +183,3 @@ def _converted_metadata_path(source: Path | str, converted_dir: Path | str | Non
     if source_path.suffix:
         return source_path.with_name(f"{source_path.stem}_normalized{source_path.suffix}")
     return source_path.with_name(f"{source_path.name}_normalized.json")
-
-

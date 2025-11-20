@@ -7,7 +7,6 @@ import json
 import shutil
 import subprocess
 import urllib.parse
-import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -16,11 +15,9 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
-from .features import OnnxClipEncoder, build_frame_feature_cache
-from .frames import extract_keyframes
+from .features import OnnxClipEncoder
 from .index import FaissIndexer
-from .metadata import VideoMetadata, save_metadata
-from .pipeline import build_or_update_index
+from .pipeline import build_or_update_index, process_video_to_embeddings
 
 
 @dataclass
@@ -57,46 +54,6 @@ class ClipRequest(BaseModel):
     video_path: str
     start: float
     end: float
-
-
-@dataclass
-class JobStatus:
-    job_id: str
-    status: str = "queued"  # queued / uploading / processing / done / error
-    stage: str = "queued"  # queued / uploading / extract_frames / encode_features / update_index / done / error
-    progress: float = 0.0  # 0-100
-    message: str = "正在排队"
-    result: Optional[Dict[str, object]] = None
-    error: Optional[str] = None
-    started_at: Optional[datetime] = None
-    updated_at: datetime = datetime.utcnow()
-
-    def eta_seconds(self) -> Optional[float]:
-        if self.started_at is None:
-            return None
-        if self.progress <= 0.05 or self.progress >= 100:
-            return None
-        elapsed = max((datetime.utcnow() - self.started_at).total_seconds(), 0.0)
-        fraction = self.progress / 100.0
-        if fraction <= 0:
-            return None
-        eta = elapsed * (1.0 / fraction - 1.0)
-        eta = max(5.0, min(eta, 3600.0))
-        return eta
-
-    def to_dict(self) -> Dict[str, object]:
-        return {
-            "job_id": self.job_id,
-            "status": self.status,
-            "stage": self.stage,
-            "progress": self.progress,
-            "message": self.message,
-            "result": self.result,
-            "error": self.error,
-            "eta_seconds": self.eta_seconds(),
-            "started_at": self.started_at.isoformat() if self.started_at else None,
-            "updated_at": self.updated_at.isoformat(),
-        }
 
 
 def _resolve_path(path: str | Path) -> Path:
@@ -173,66 +130,6 @@ def create_app(config: WebAppConfig) -> FastAPI:
 
     app = FastAPI(title=config.title)
     processing_lock = asyncio.Lock()
-    job_status: Dict[str, JobStatus] = {}
-
-    progress_ranges = {
-        "queued": (0.0, 5.0),
-        "uploading": (0.0, 10.0),
-        "extract_frames": (10.0, 60.0),
-        "encode_features": (60.0, 90.0),
-        "update_index": (90.0, 99.0),
-        "done": (100.0, 100.0),
-        "error": (0.0, 0.0),
-    }
-
-    def _progress_for_stage(stage: str, fraction: float = 0.0) -> float:
-        start, end = progress_ranges.get(stage, (0.0, 100.0))
-        fraction = max(0.0, min(fraction, 1.0))
-        return start + (end - start) * fraction
-
-    def _set_stage(
-        job_id: str,
-        stage: str,
-        *,
-        status: Optional[str] = None,
-        fraction: float = 0.0,
-        message: Optional[str] = None,
-    ) -> JobStatus:
-        payload: Dict[str, object] = {
-            "stage": stage,
-            "progress": _progress_for_stage(stage, fraction),
-        }
-        if status:
-            payload["status"] = status
-        if message is not None:
-            payload["message"] = message
-        return _update_job(job_id, **payload)
-
-    def _update_job(job_id: str, **kwargs: object) -> JobStatus:
-        job = job_status[job_id]
-        for key, value in kwargs.items():
-            if key == "progress" and isinstance(value, (int, float)):
-                value = max(0.0, min(float(value), 100.0))
-            setattr(job, key, value)
-        if job.started_at is None and job.status in {"processing", "uploading"}:
-            job.started_at = datetime.utcnow()
-        job.updated_at = datetime.utcnow()
-        job_status[job_id] = job
-        return job
-
-    def _new_job(message: str) -> JobStatus:
-        job_id = uuid.uuid4().hex
-        status = JobStatus(
-            job_id=job_id,
-            message=message,
-            status="queued",
-            stage="queued",
-            progress=0.0,
-            started_at=datetime.utcnow(),
-            updated_at=datetime.utcnow(),
-        )
-        job_status[job_id] = status
-        return status
 
     @app.get("/", response_class=HTMLResponse)
     def homepage() -> str:
@@ -329,8 +226,6 @@ def create_app(config: WebAppConfig) -> FastAPI:
         if not file.filename:
             raise HTTPException(status_code=400, detail="请提供视频文件")
 
-        job = _new_job("正在排队")
-
         suffix = Path(file.filename).suffix or ".mp4"
         stem = _safe_stem(file.filename)
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -342,125 +237,54 @@ def create_app(config: WebAppConfig) -> FastAPI:
 
         try:
             _save_upload(file, candidate)
-            _set_stage(job.job_id, "uploading", status="uploading", fraction=1.0, message="上传完成，等待处理")
         except Exception as exc:  # pragma: no cover
-            _update_job(job.job_id, status="error", stage="uploading", progress=0.0, message=f"保存视频失败: {exc}", error=str(exc))
             raise HTTPException(status_code=500, detail=f"保存视频失败: {exc}") from exc
         finally:
             file.file.close()
 
-        async def _process_job() -> None:
-            nonlocal indexer
+        async with processing_lock:
             try:
-                _set_stage(job.job_id, "queued", status="queued", fraction=0.8, message="等待其他任务完成")
-                async with processing_lock:
-                    _set_stage(job.job_id, "extract_frames", status="processing", fraction=0.05, message="正在抽帧")
-                    frames_dir = output_root / "frames" / candidate.stem
-                    embeddings_dir = output_root / "embeddings" / config.model_type / candidate.stem
-                    feature_path = embeddings_dir / "frame_features.npy"
-                    metadata_file = output_root / "metadata" / f"{candidate.stem}.json"
-                    frames_dir.mkdir(parents=True, exist_ok=True)
-                    embeddings_dir.mkdir(parents=True, exist_ok=True)
-
-                    frames, fps = await asyncio.to_thread(
-                        extract_keyframes,
-                        candidate,
-                        frames_dir,
-                        config.processing_method,
-                        config.processing_interval,
-                        config.processing_scene_threshold,
-                        config.processing_image_format,
-                        config.processing_quality,
-                    )
-
-                    _set_stage(
-                        job.job_id,
-                        "extract_frames",
-                        status="processing",
-                        fraction=0.9,
-                        message="抽帧完成",
-                    )
-                    _set_stage(job.job_id, "encode_features", status="processing", fraction=0.05, message="开始生成向量")
-
-                    def _encode_progress(done: int, total: int) -> None:
-                        fraction = 0.0 if total <= 0 else done / float(total)
-                        _set_stage(
-                            job.job_id,
-                            "encode_features",
-                            status="processing",
-                            fraction=fraction,
-                            message=f"生成向量 {done}/{total}",
-                        )
-                    cache = await asyncio.to_thread(
-                        build_frame_feature_cache,
-                        frames,
-                        encoder,
-                        feature_path,
-                        config.processing_batch_size,
-                        _encode_progress,
-                    )
-
-                    _set_stage(job.job_id, "encode_features", fraction=1.0, message="向量生成完成，写入元数据")
-
-                    metadata = VideoMetadata(
-                        video_path=str(candidate),
-                        frames=cache.frames,
-                        feature_file=str(feature_path),
-                        embedding_dim=int(cache.features.shape[1]) if cache.features.size else encoder.dimension,
-                        model_type=config.model_type,
-                        image_model_path=str(config.image_model) if config.image_model else None,
-                        text_model_path=str(config.text_model) if config.text_model else None,
-                        tokenizer_path=config.tokenizer_path,
-                        frame_interval=config.processing_interval if config.processing_method == "interval" else None,
-                        fps=fps,
-                        method=config.processing_method,
-                    )
-                    await asyncio.to_thread(save_metadata, metadata, metadata_file)
-
-                    _set_stage(job.job_id, "update_index", status="processing", fraction=0.1, message="正在更新索引")
-                    indexer = await asyncio.to_thread(
-                        build_or_update_index,
-                        [metadata_file],
-                        index_path,
-                        manifest_path=manifest_path,
-                        metric=indexer.metric,
-                        normalize=indexer.normalize,
-                        indexer=indexer,
-                    )
-                    _set_stage(job.job_id, "update_index", status="processing", fraction=0.95, message="索引更新完成")
-                    _set_stage(job.job_id, "done", status="done", fraction=1.0, message="处理完成，可以开始检索")
-                    _update_job(
-                        job.job_id,
-                        result={
-                            "video_path": str(candidate),
-                            "metadata_path": str(metadata_file),
-                            "index_path": str(index_path),
-                        },
-                    )
-            except Exception as exc:  # pragma: no cover
-                _update_job(
-                    job.job_id,
-                    status="error",
-                    stage="error",
-                    progress=job_status[job.job_id].progress,
-                    message=f"处理失败: {exc}",
-                    error=str(exc),
+                result = process_video_to_embeddings(
+                    video_path=candidate,
+                    output_root=output_root,
+                    model_type=config.model_type,
+                    image_model_path=config.image_model,
+                    text_model_path=config.text_model,
+                    tokenizer_path=config.tokenizer_path,
+                    method=config.processing_method,
+                    interval=config.processing_interval,
+                    scene_threshold=config.processing_scene_threshold,
+                    image_format=config.processing_image_format,
+                    quality=config.processing_quality,
+                    batch_size=config.processing_batch_size,
+                    device=config.device,
+                    metadata_path=output_root / "metadata" / f"{candidate.stem}.json",
+                    encoder=encoder,
                 )
+            except Exception as exc:  # pragma: no cover
+                candidate.unlink(missing_ok=True)
+                raise HTTPException(status_code=500, detail=f"处理失败: {exc}") from exc
 
-        asyncio.create_task(_process_job())
+            try:
+                nonlocal indexer
+                indexer = build_or_update_index(
+                    metadata_paths=[result.metadata_path],
+                    index_path=index_path,
+                    manifest_path=manifest_path,
+                    metric=indexer.metric,
+                    normalize=indexer.normalize,
+                    indexer=indexer,
+                )
+            except Exception as exc:  # pragma: no cover
+                raise HTTPException(status_code=500, detail=f"索引更新失败: {exc}") from exc
 
         return {
             "success": True,
-            "message": "文件已上传，开始后台处理",
-            "job_id": job.job_id,
+            "message": "处理完成，可以开始检索",
+            "video_path": str(candidate),
+            "metadata_path": str(result.metadata_path),
+            "index_path": str(index_path),
         }
-
-    @app.get("/api/add_video_status")
-    def add_video_status(job_id: str) -> Dict[str, object]:
-        status = job_status.get(job_id)
-        if not status:
-            raise HTTPException(status_code=404, detail="未找到对应任务")
-        return status.to_dict()
 
     return app
 
@@ -816,61 +640,6 @@ TEMPLATE = """<!DOCTYPE html>
         if (uploadTarget && APP_CONFIG.uploadDir) {
           uploadTarget.textContent = APP_CONFIG.uploadDir;
         }
-        const pollStatus = (jobId) => {
-          let timer = null;
-          const stop = () => { if (timer) clearInterval(timer); timer = null; };
-          const stageName = (stage) => {
-            switch (stage) {
-              case 'uploading': return '上传';
-              case 'queued': return '排队';
-              case 'extract_frames': return '抽帧';
-              case 'encode_features': return '生成向量';
-              case 'update_index': return '更新索引';
-              case 'done': return '完成';
-              case 'error': return '错误';
-              default: return stage || '处理中';
-            }
-          };
-          const formatEta = (eta) => {
-            if (typeof eta !== 'number' || eta <= 0) return '';
-            const seconds = Math.round(eta);
-            if (seconds < 60) return `${seconds} 秒`;
-            const mins = Math.floor(seconds / 60);
-            const secs = seconds % 60;
-            return secs ? `${mins} 分 ${secs} 秒` : `${mins} 分`;
-          };
-          const tick = async () => {
-            try {
-              const res = await fetch(`/api/add_video_status?job_id=${jobId}`);
-              const data = await res.json().catch(() => ({}));
-              if (!res.ok) throw new Error(data.detail || '查询进度失败');
-              const pct = Math.round(data.progress || 0);
-              const etaText = data.status === 'done' || data.status === 'error' ? '' : formatEta(data.eta_seconds);
-              const parts = [stageName(data.stage), `${pct}%`];
-              if (data.message) parts.push(data.message);
-              if (etaText) parts.push(`预计 ${etaText}`);
-              uploadStatus.textContent = parts.filter(Boolean).join('｜');
-              if (data.status === 'done') {
-                stop();
-                setUploadProcessing(false);
-                uploadStatus.textContent = data.message || '处理完成';
-                videoInput.value = '';
-              } else if (data.status === 'error') {
-                stop();
-                setUploadProcessing(false);
-                uploadStatus.textContent = data.message || '处理失败';
-              }
-            } catch (err) {
-              stop();
-              setUploadProcessing(false);
-              uploadStatus.textContent = err.message;
-            }
-          };
-          timer = setInterval(tick, 1500);
-          tick();
-          return stop;
-        };
-
         uploadForm.addEventListener('submit', async (evt) => {
           evt.preventDefault();
           if (!videoInput || !videoInput.files || !videoInput.files[0]) {
@@ -878,43 +647,24 @@ TEMPLATE = """<!DOCTYPE html>
             return;
           }
           setUploadProcessing(true);
-          uploadStatus.textContent = '正在上传...';
+          uploadStatus.textContent = '正在上传并处理，请稍候...';
           const formData = new FormData();
           formData.append('file', videoInput.files[0]);
           try {
-            const xhr = new XMLHttpRequest();
-            xhr.open('POST', '/api/add_video');
-            xhr.upload.onprogress = (evt) => {
-              if (evt.lengthComputable) {
-                const pct = Math.round((evt.loaded / evt.total) * 100);
-                uploadStatus.textContent = `上传中 ${pct}%...`;
-              } else {
-                uploadStatus.textContent = '上传中...';
-              }
-            };
-            xhr.onerror = () => {
-              uploadStatus.textContent = '上传失败';
-              setUploadProcessing(false);
-            };
-            xhr.onload = () => {
-              try {
-                const data = JSON.parse(xhr.responseText || '{}');
-                if (xhr.status >= 200 && xhr.status < 300 && data.success && data.job_id) {
-                  uploadStatus.textContent = '上传完成，后台处理中...';
-                  pollStatus(data.job_id);
-                } else {
-                  const msg = data.message || data.detail || `处理失败 (${xhr.status})`;
-                  uploadStatus.textContent = msg;
-                  setUploadProcessing(false);
-                }
-              } catch (err) {
-                uploadStatus.textContent = '解析响应失败';
-                setUploadProcessing(false);
-              }
-            };
-            xhr.send(formData);
+            const res = await fetch('/api/add_video', {
+              method: 'POST',
+              body: formData,
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok || !data.success) {
+              throw new Error(data.message || data.detail || '处理失败');
+            }
+            const saved = data.video_path ? `（已保存到 ${data.video_path}）` : '';
+            uploadStatus.textContent = (data.message || '处理完成，可以开始检索') + saved;
+            videoInput.value = '';
           } catch (err) {
             uploadStatus.textContent = err.message;
+          } finally {
             setUploadProcessing(false);
           }
         });
