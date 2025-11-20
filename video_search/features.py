@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-import platform
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Sequence
@@ -61,39 +59,24 @@ class OnnxClipEncoder:
         if device.lower() == "cuda":
             providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
 
-        self.image_model_path = str(image_model_path) if image_model_path else None
-        self.text_model_path = str(text_model_path) if text_model_path else None
-
-        sess_options = ort.SessionOptions()
-        # Keep threading conservative on macOS/CPU to avoid libomp duplication.
-        if platform.system() == "Darwin":
-            intra_threads = int(os.environ.get("ORT_INTRA_OP_THREADS", "1"))
-            inter_threads = int(os.environ.get("ORT_INTER_OP_THREADS", "1"))
-            sess_options.intra_op_num_threads = intra_threads
-            sess_options.inter_op_num_threads = inter_threads
-            sess_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-        self._session_options = sess_options
-
         self.image_session: ort.InferenceSession | None = None
         if image_model_path is not None:
             self.image_session = ort.InferenceSession(
-                str(image_model_path), sess_options=self._session_options, providers=providers
+                str(image_model_path), providers=providers
             )
         self.text_session: ort.InferenceSession | None = None
         if text_model_path is not None:
             self.text_session = ort.InferenceSession(
-                str(text_model_path), sess_options=self._session_options, providers=providers
+                str(text_model_path), providers=providers
             )
 
         if tokenizer is not None:
             self.tokenizer = tokenizer
-            self.tokenizer_path = tokenizer_path
         else:
             target_path = tokenizer_path or self.config.get("default_tokenizer")
             if target_path is None:
                 raise ValueError("tokenizer_path must be provided when no default is set")
             self.tokenizer = AutoTokenizer.from_pretrained(target_path)
-            self.tokenizer_path = target_path
         self.normalize = normalize
         self.max_length = int(self.config["max_length"])
         self._dimension: int | None = None
