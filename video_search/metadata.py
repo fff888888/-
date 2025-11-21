@@ -126,9 +126,8 @@ def save_metadata(metadata: VideoMetadata, path: Path | str) -> None:
 
     json_path = Path(path)
     json_path.parent.mkdir(parents=True, exist_ok=True)
-    payload = _convert_paths_to_str(metadata.to_dict())
     with json_path.open("w", encoding="utf-8") as fh:
-        json.dump(payload, fh, indent=2, ensure_ascii=False)
+        json.dump(metadata.to_dict(), fh, indent=2, ensure_ascii=False)
 
 
 def load_metadata(
@@ -375,18 +374,4 @@ EMBEDDING_VECTOR_KEYS = (
     "clip_vector",
     "clip_features",
 )
-
-
-def _convert_paths_to_str(obj: Any) -> Any:
-    """Recursively convert ``Path`` objects to ``str`` for JSON serialization."""
-
-    if isinstance(obj, Path):
-        return str(obj)
-    if isinstance(obj, dict):
-        return {k: _convert_paths_to_str(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_convert_paths_to_str(v) for v in obj]
-    if isinstance(obj, tuple):
-        return tuple(_convert_paths_to_str(v) for v in obj)
-    return obj
 
