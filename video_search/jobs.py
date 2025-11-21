@@ -14,7 +14,7 @@ class JobRecord:
     job_id: str
     video_id: str
     status: str = "pending"  # pending / uploading / processing / completed / error
-    stage: str = "uploading"  # uploading / extracting / indexing / completed / error
+    stage: str = "uploading"  # uploading / extracting_frames / indexing / completed / error
     progress: float = 0.0  # 0 - 100
     message: str = "正在排队"
     eta_seconds: Optional[float] = None
@@ -46,15 +46,11 @@ class JobRecord:
         if progress <= 1.0:
             progress = progress * 100.0
 
-        stage = str(data.get("stage", data.get("phase", "uploading")))
-        if stage == "extracting_frames":
-            stage = "extracting"
-
         return JobRecord(
             job_id=str(data.get("job_id", "")),
             video_id=str(data.get("video_id", "")),
             status=str(data.get("status", "pending")),
-            stage=stage,
+            stage=str(data.get("stage", data.get("phase", "uploading"))),
             progress=progress,
             message=str(data.get("message", "")),
             eta_seconds=data.get("eta_seconds"),
