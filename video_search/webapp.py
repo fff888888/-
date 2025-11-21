@@ -15,12 +15,9 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
-from .features import OnnxClipEncoder, build_frame_feature_cache
-from .frames import extract_keyframes
+from .features import OnnxClipEncoder
 from .index import FaissIndexer
-from .metadata import VideoMetadata, save_metadata
-from .jobs import JobStore, JobRecord
-from .pipeline import build_or_update_index
+from .pipeline import build_or_update_index, process_video_to_embeddings
 
 
 @dataclass
@@ -131,48 +128,8 @@ def create_app(config: WebAppConfig) -> FastAPI:
         device=config.device,
     )
 
-    jobs_path = output_root / "index" / "jobs.json"
-    job_store = JobStore(jobs_path)
-
     app = FastAPI(title=config.title)
     processing_lock = asyncio.Lock()
-
-    progress_ranges = {
-        "uploading": (0.0, 10.0),
-        "extracting_frames": (10.0, 90.0),
-        "indexing": (90.0, 100.0),
-        "completed": (100.0, 100.0),
-        "error": (0.0, 0.0),
-    }
-
-    def _progress_for_stage(stage: str, fraction: float = 0.0) -> float:
-        start, end = progress_ranges.get(stage, (0.0, 100.0))
-        fraction = max(0.0, min(fraction, 1.0))
-        return start + (end - start) * fraction
-
-    def _set_stage(
-        job_id: str,
-        stage: str,
-        *,
-        status: Optional[str] = None,
-        fraction: float = 0.0,
-        message: Optional[str] = None,
-    ) -> JobRecord:
-        payload: Dict[str, object] = {
-            "stage": stage,
-            "progress": _progress_for_stage(stage, fraction),
-        }
-        if status:
-            payload["status"] = status
-        if message is not None:
-            payload["message"] = message
-        return _update_job(job_id, **payload)
-
-    def _update_job(job_id: str, **kwargs: object) -> JobRecord:
-        return job_store.update_job(job_id, **kwargs)
-
-    def _new_job(video_id: str, message: str) -> JobRecord:
-        return job_store.new_job(video_id=video_id, message=message)
 
     @app.get("/", response_class=HTMLResponse)
     def homepage() -> str:
@@ -272,145 +229,62 @@ def create_app(config: WebAppConfig) -> FastAPI:
         suffix = Path(file.filename).suffix or ".mp4"
         stem = _safe_stem(file.filename)
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        video_id = f"{stem}_{timestamp}"
-        job = _new_job(video_id, "正在排队")
-
-        candidate = upload_dir / f"{video_id}{suffix}"
+        candidate = upload_dir / f"{stem}_{timestamp}{suffix}"
         counter = 1
         while candidate.exists():
-            video_id = f"{stem}_{timestamp}_{counter}"
-            candidate = upload_dir / f"{video_id}{suffix}"
+            candidate = upload_dir / f"{stem}_{timestamp}_{counter}{suffix}"
             counter += 1
 
         try:
             _save_upload(file, candidate)
-            _set_stage(job.job_id, "uploading", status="processing", fraction=0.9, message="上传完成，等待处理")
         except Exception as exc:  # pragma: no cover
-            _update_job(job.job_id, status="error", stage="uploading", progress=0.0, message=f"保存视频失败: {exc}", error=str(exc))
             raise HTTPException(status_code=500, detail=f"保存视频失败: {exc}") from exc
         finally:
             file.file.close()
 
-        async def _process_job() -> None:
-            nonlocal indexer
+        async with processing_lock:
             try:
-                _set_stage(job.job_id, "uploading", status="processing", fraction=1.0, message="上传完成，准备处理")
-                async with processing_lock:
-                    _set_stage(job.job_id, "extracting_frames", status="processing", fraction=0.05, message="正在抽帧")
-                    frames_dir = output_root / "frames" / candidate.stem
-                    embeddings_dir = output_root / "embeddings" / config.model_type / candidate.stem
-                    feature_path = embeddings_dir / "frame_features.npy"
-                    metadata_file = output_root / "metadata" / f"{candidate.stem}.json"
-                    frames_dir.mkdir(parents=True, exist_ok=True)
-                    embeddings_dir.mkdir(parents=True, exist_ok=True)
-
-                    frames, fps = await asyncio.to_thread(
-                        extract_keyframes,
-                        candidate,
-                        frames_dir,
-                        config.processing_method,
-                        config.processing_interval,
-                        config.processing_scene_threshold,
-                        config.processing_image_format,
-                        config.processing_quality,
-                    )
-
-                    _set_stage(
-                        job.job_id,
-                        "extracting_frames",
-                        status="processing",
-                        fraction=0.4,
-                        message="抽帧完成",
-                    )
-                    _set_stage(job.job_id, "extracting_frames", status="processing", fraction=0.5, message="开始生成向量")
-
-                    def _encode_progress(done: int, total: int) -> None:
-                        fraction = 0.0 if total <= 0 else done / float(total)
-                        _set_stage(
-                            job.job_id,
-                            "extracting_frames",
-                            status="processing",
-                            fraction=fraction,
-                            message=f"生成向量 {done}/{total}",
-                        )
-                    cache = await asyncio.to_thread(
-                        build_frame_feature_cache,
-                        frames,
-                        encoder,
-                        feature_path,
-                        config.processing_batch_size,
-                        _encode_progress,
-                    )
-
-                    _set_stage(job.job_id, "extracting_frames", fraction=1.0, message="向量生成完成，写入元数据")
-
-                    metadata = VideoMetadata(
-                        video_path=str(candidate),
-                        frames=cache.frames,
-                        feature_file=str(feature_path),
-                        embedding_dim=int(cache.features.shape[1]) if cache.features.size else encoder.dimension,
-                        model_type=config.model_type,
-                        image_model_path=str(config.image_model) if config.image_model else None,
-                        text_model_path=str(config.text_model) if config.text_model else None,
-                        tokenizer_path=config.tokenizer_path,
-                        frame_interval=config.processing_interval if config.processing_method == "interval" else None,
-                        fps=fps,
-                        method=config.processing_method,
-                    )
-                    await asyncio.to_thread(save_metadata, metadata, metadata_file)
-
-                    _set_stage(job.job_id, "indexing", status="processing", fraction=0.1, message="正在更新索引")
-                    indexer = await asyncio.to_thread(
-                        build_or_update_index,
-                        [metadata_file],
-                        index_path,
-                        manifest_path=manifest_path,
-                        metric=indexer.metric,
-                        normalize=indexer.normalize,
-                        indexer=indexer,
-                    )
-                    _set_stage(job.job_id, "indexing", status="processing", fraction=0.95, message="索引更新完成")
-                    _set_stage(job.job_id, "completed", status="completed", fraction=1.0, message="处理完成，可以开始检索")
-                    _update_job(
-                        job.job_id,
-                        result={
-                            "video_path": str(candidate),
-                            "metadata_path": str(metadata_file),
-                            "index_path": str(index_path),
-                            "video_id": video_id,
-                        },
-                    )
-            except Exception as exc:  # pragma: no cover
-                _update_job(
-                    job.job_id,
-                    status="error",
-                    stage="error",
-                    progress=(job_store.get(job.job_id).progress if job_store.get(job.job_id) else 0.0),
-                    message=f"处理失败: {exc}",
-                    error=str(exc),
+                result = process_video_to_embeddings(
+                    video_path=candidate,
+                    output_root=output_root,
+                    model_type=config.model_type,
+                    image_model_path=config.image_model,
+                    text_model_path=config.text_model,
+                    tokenizer_path=config.tokenizer_path,
+                    method=config.processing_method,
+                    interval=config.processing_interval,
+                    scene_threshold=config.processing_scene_threshold,
+                    image_format=config.processing_image_format,
+                    quality=config.processing_quality,
+                    batch_size=config.processing_batch_size,
+                    device=config.device,
+                    metadata_path=output_root / "metadata" / f"{candidate.stem}.json",
+                    encoder=encoder,
                 )
+            except Exception as exc:  # pragma: no cover
+                candidate.unlink(missing_ok=True)
+                raise HTTPException(status_code=500, detail=f"处理失败: {exc}") from exc
 
-        asyncio.create_task(_process_job())
+            try:
+                nonlocal indexer
+                indexer = build_or_update_index(
+                    metadata_paths=[result.metadata_path],
+                    index_path=index_path,
+                    manifest_path=manifest_path,
+                    metric=indexer.metric,
+                    normalize=indexer.normalize,
+                    indexer=indexer,
+                )
+            except Exception as exc:  # pragma: no cover
+                raise HTTPException(status_code=500, detail=f"索引更新失败: {exc}") from exc
 
         return {
             "success": True,
-            "message": "文件已上传，开始后台处理",
-            "job_id": job.job_id,
-            "video_id": video_id,
-            "status": job.status,
-            "progress": job.progress,
-            "stage": job.stage,
+            "message": "处理完成，可以开始检索",
+            "video_path": str(candidate),
+            "metadata_path": str(result.metadata_path),
+            "index_path": str(index_path),
         }
-
-    @app.get("/api/add_video_status")
-    def add_video_status(job_id: Optional[str] = None) -> Dict[str, object]:
-        target_id = job_id or (job_store.last().job_id if job_store.last() else None)
-        if not target_id:
-            raise HTTPException(status_code=404, detail="未找到对应任务")
-        status = job_store.get(target_id)
-        if not status:
-            raise HTTPException(status_code=404, detail="未找到对应任务")
-        return status.to_dict()
 
     return app
 
@@ -469,30 +343,6 @@ TEMPLATE = """<!DOCTYPE html>
       min-height: 20px;
       color: #c7c7e7;
       font-size: 14px;
-    }
-    #progress-container {
-      margin-top: 10px;
-      height: 16px;
-      border-radius: 999px;
-      background: rgba(255,255,255,0.08);
-      overflow: hidden;
-      position: relative;
-      display: none;
-    }
-    #progress-bar {
-      height: 100%;
-      width: 0%;
-      background: linear-gradient(135deg, #8a63ff, #3f7dfd);
-      color: #fff;
-      font-size: 12px;
-      line-height: 16px;
-      text-indent: 8px;
-      transition: width 0.3s ease;
-    }
-    #progress-text, #eta-text {
-      margin-top: 6px;
-      font-size: 13px;
-      color: #c7c7e7;
     }
     #upload-disabled {
       margin-top: 12px;
@@ -681,11 +531,6 @@ TEMPLATE = """<!DOCTYPE html>
         <button type=\"submit\" class=\"primary\" id=\"upload-button\">上传并处理</button>
       </form>
       <div id=\"upload-status\"></div>
-      <div id=\"progress-container\">
-        <div id=\"progress-bar\"></div>
-      </div>
-      <div id=\"progress-text\"></div>
-      <div id=\"eta-text\"></div>
       <div id=\"upload-disabled\" style=\"display:none;\">服务器缺少图像模型，仅可检索已有素材。</div>
     </section>
 
@@ -795,107 +640,31 @@ TEMPLATE = """<!DOCTYPE html>
         if (uploadTarget && APP_CONFIG.uploadDir) {
           uploadTarget.textContent = APP_CONFIG.uploadDir;
         }
-        const progressContainer = document.getElementById('progress-container');
-        const progressBar = document.getElementById('progress-bar');
-        const progressText = document.getElementById('progress-text');
-        const etaTextEl = document.getElementById('eta-text');
-
-        const stageName = (stage) => {
-          switch (stage) {
-            case 'uploading': return '上传';
-            case 'extracting_frames': return '抽帧/生成向量';
-            case 'indexing': return '更新索引';
-            case 'completed': return '完成';
-            case 'error': return '错误';
-            default: return stage || '处理中';
-          }
-        };
-
-        const formatEta = (eta) => {
-          if (typeof eta !== 'number' || eta <= 0) return '';
-          const seconds = Math.round(eta);
-          if (seconds < 60) return `${seconds} 秒`;
-          const mins = Math.floor(seconds / 60);
-          const secs = seconds % 60;
-          return secs ? `${mins} 分 ${secs} 秒` : `${mins} 分`;
-        };
-
-        const updateProgressBar = (pct, stageText, etaText) => {
-          if (!progressContainer) return;
-          progressContainer.style.display = 'block';
-          progressBar.style.width = `${pct}%`;
-          progressBar.textContent = `${pct}%`;
-          progressText.textContent = stageText ? `${stageText}（${pct}%）` : `${pct}%`;
-          etaTextEl.textContent = etaText ? `预计 ${etaText}` : '';
-        };
-
-        const pollStatus = (jobId) => {
-          let timer = null;
-          const stop = () => { if (timer) clearInterval(timer); timer = null; };
-          const tick = async () => {
-            try {
-              const res = await fetch(`/api/add_video_status?job_id=${jobId}`);
-              const data = await res.json().catch(() => ({}));
-              if (!res.ok) throw new Error(data.detail || '查询进度失败');
-              const pct = Math.round(data.progress || 0);
-              const etaText = data.status === 'completed' || data.status === 'error' ? '' : formatEta(data.eta_seconds);
-              const stageText = stageName(data.stage);
-              updateProgressBar(pct, stageText, etaText);
-              const parts = [stageText, `${pct}%`];
-              if (data.message) parts.push(data.message);
-              if (etaText) parts.push(`预计 ${etaText}`);
-              uploadStatus.textContent = parts.filter(Boolean).join('｜');
-              if (data.status === 'completed') {
-                stop();
-                setUploadProcessing(false);
-                uploadStatus.textContent = data.message || '处理完成';
-                updateProgressBar(100, stageName('completed'), '');
-                videoInput.value = '';
-              } else if (data.status === 'error') {
-                stop();
-                setUploadProcessing(false);
-                uploadStatus.textContent = data.message || '处理失败';
-              }
-            } catch (err) {
-              stop();
-              setUploadProcessing(false);
-              uploadStatus.textContent = err.message;
-            }
-          };
-          timer = setInterval(tick, 1000);
-          tick();
-          return stop;
-        };
-
-        const startUpload = async (file) => {
-          const formData = new FormData();
-          formData.append('file', file);
-          setUploadProcessing(true);
-          updateProgressBar(0, '上传', '');
-          uploadStatus.textContent = '正在上传...';
-          const res = await fetch('/api/add_video', { method: 'POST', body: formData });
-          const data = await res.json().catch(() => ({}));
-          if (!res.ok || !data.job_id) {
-            const msg = data.detail || data.message || '上传失败';
-            setUploadProcessing(false);
-            uploadStatus.textContent = msg;
-            throw new Error(msg);
-          }
-          uploadStatus.textContent = '上传完成，后台处理中...';
-          return data.job_id;
-        };
-
         uploadForm.addEventListener('submit', async (evt) => {
           evt.preventDefault();
           if (!videoInput || !videoInput.files || !videoInput.files[0]) {
             uploadStatus.textContent = '请选择要上传的视频文件';
             return;
           }
+          setUploadProcessing(true);
+          uploadStatus.textContent = '正在上传并处理，请稍候...';
+          const formData = new FormData();
+          formData.append('file', videoInput.files[0]);
           try {
-            const jobId = await startUpload(videoInput.files[0]);
-            pollStatus(jobId);
+            const res = await fetch('/api/add_video', {
+              method: 'POST',
+              body: formData,
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok || !data.success) {
+              throw new Error(data.message || data.detail || '处理失败');
+            }
+            const saved = data.video_path ? `（已保存到 ${data.video_path}）` : '';
+            uploadStatus.textContent = (data.message || '处理完成，可以开始检索') + saved;
+            videoInput.value = '';
           } catch (err) {
-            if (err instanceof Error) uploadStatus.textContent = err.message;
+            uploadStatus.textContent = err.message;
+          } finally {
             setUploadProcessing(false);
           }
         });
