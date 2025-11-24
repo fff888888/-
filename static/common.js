@@ -38,13 +38,11 @@
     extracting: '🔍 正在抽帧与提取特征…',
     indexing: '📚 正在写入索引…',
     completed: '✅ 处理完成，可以开始检索',
-    finished: '✅ 处理完成，可以开始检索', // 兼容旧阶段名
     error: '❌ 处理出错，请重新上传',
   };
 
   function stageLabel(stage) {
-    const normalized = stage === 'finished' ? 'completed' : stage;
-    return stageTextMap[normalized] || '⏳ 正在处理中…';
+    return stageTextMap[stage] || '⏳ 正在处理中…';
   }
 
   function clampProgress(value) {
@@ -81,20 +79,18 @@
   }
 
   function updateProgressUI(progress, stage, etaSeconds) {
-    const normalizedStage = stage === 'finished' ? 'completed' : stage;
     const pct = clampProgress(progress);
-    const done = normalizedStage === 'completed' || pct >= 100;
-    const etaText = done || normalizedStage === 'error' ? '' : formatEta(etaSeconds);
+    const etaText = stage === 'completed' || stage === 'error' ? '' : formatEta(etaSeconds);
     if (els.progressBar) {
       els.progressBar.style.width = `${pct}%`;
       els.progressBar.textContent = `${pct}%`;
     }
     if (els.progressText) els.progressText.textContent = `${pct}%`;
-    if (els.stageText) els.stageText.textContent = stageLabel(normalizedStage);
+    if (els.stageText) els.stageText.textContent = stageLabel(stage);
     if (els.etaText) els.etaText.textContent = etaText;
     showProgressArea();
     if (els.uploadStatus) {
-      const parts = [stageLabel(normalizedStage), `${pct}%`];
+      const parts = [stageLabel(stage), `${pct}%`];
       if (etaText) parts.push(etaText);
       els.uploadStatus.textContent = parts.filter(Boolean).join(' ｜ ');
     }
@@ -120,7 +116,7 @@
         const etaSeconds = data.eta_seconds;
         updateProgressUI(pct, stage, etaSeconds);
 
-        if (stage === 'finished' || stage === 'completed' || pct >= 100) {
+        if (stage === 'completed' || pct >= 100) {
           stopPolling();
           setUploadProcessing(false);
           updateProgressUI(100, 'completed', 0);
