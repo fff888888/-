@@ -36,9 +36,7 @@
   const stageTextMap = {
     uploading: '⏳ 正在上传视频…',
     extracting: '🔍 正在抽帧与提取特征…',
-    embedding: '🧠 正在生成特征向量…',
     indexing: '📚 正在写入索引…',
-    finished: '✅ 处理完成，可以开始检索',
     completed: '✅ 处理完成，可以开始检索',
     error: '❌ 处理出错，请重新上传',
   };
@@ -82,8 +80,7 @@
 
   function updateProgressUI(progress, stage, etaSeconds) {
     const pct = clampProgress(progress);
-    const done = stage === 'finished' || stage === 'completed' || pct >= 100;
-    const etaText = done || stage === 'error' ? '' : formatEta(etaSeconds);
+    const etaText = stage === 'completed' || stage === 'error' ? '' : formatEta(etaSeconds);
     if (els.progressBar) {
       els.progressBar.style.width = `${pct}%`;
       els.progressBar.textContent = `${pct}%`;
@@ -119,10 +116,10 @@
         const etaSeconds = data.eta_seconds;
         updateProgressUI(pct, stage, etaSeconds);
 
-        if (stage === 'finished' || stage === 'completed' || pct >= 100) {
+        if (stage === 'completed' || pct >= 100) {
           stopPolling();
           setUploadProcessing(false);
-          updateProgressUI(100, 'finished', 0);
+          updateProgressUI(100, 'completed', 0);
           if (els.videoInput) els.videoInput.value = '';
         } else if (stage === 'error') {
           stopPolling();
