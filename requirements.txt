@@ -1,0 +1,12 @@
+opencv-python
+onnxruntime; platform_system != "Darwin" or platform_machine != "arm64"
+onnxruntime-silicon; platform_system == "Darwin" and platform_machine == "arm64"
+transformers
+faiss-cpu
+numpy
+Pillow
+fastapi
+uvicorn
+python-multipart
+torch
+git+https://github.com/openai/CLIP.git
