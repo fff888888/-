@@ -11,12 +11,14 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
+
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
 from .features import OnnxClipEncoder
 from .index import FaissIndexer
+from .jobs import JobStore
 from .pipeline import build_or_update_index, process_video_to_embeddings
 
 
@@ -130,6 +132,8 @@ def create_app(config: WebAppConfig) -> FastAPI:
 
     app = FastAPI(title=config.title)
     processing_lock = asyncio.Lock()
+    job_store = JobStore(output_root / "jobs" / "jobs.json")
+    processing_tasks: set[asyncio.Task[None]] = set()
 
     @app.get("/", response_class=HTMLResponse)
     def homepage() -> str:
@@ -219,6 +223,76 @@ def create_app(config: WebAppConfig) -> FastAPI:
         }
         return StreamingResponse(iterator(), media_type="video/mp4", headers=headers)
 
+    async def _process_job(job_id: str, video_path: Path) -> None:
+        nonlocal indexer
+
+        def _update_index(result_metadata_path: Path) -> None:
+            nonlocal indexer
+            indexer = build_or_update_index(
+                metadata_paths=[result_metadata_path],
+                index_path=index_path,
+                manifest_path=manifest_path,
+                metric=indexer.metric,
+                normalize=indexer.normalize,
+                indexer=indexer,
+            )
+
+        try:
+            job_store.update_job(
+                job_id,
+                status="processing",
+                stage="extracting",
+                progress=10.0,
+                message="正在抽帧与提取特征",
+            )
+            async with processing_lock:
+                result = await asyncio.to_thread(
+                    process_video_to_embeddings,
+                    video_path,
+                    output_root,
+                    model_type=config.model_type,
+                    image_model_path=config.image_model,
+                    text_model_path=config.text_model,
+                    tokenizer_path=config.tokenizer_path,
+                    method=config.processing_method,
+                    interval=config.processing_interval,
+                    scene_threshold=config.processing_scene_threshold,
+                    image_format=config.processing_image_format,
+                    quality=config.processing_quality,
+                    batch_size=config.processing_batch_size,
+                    device=config.device,
+                    metadata_path=output_root / "metadata" / f"{video_path.stem}.json",
+                    encoder=encoder,
+                )
+                job_store.update_job(
+                    job_id,
+                    stage="indexing",
+                    progress=85.0,
+                    message="正在写入索引",
+                )
+                await asyncio.to_thread(_update_index, result.metadata_path)
+
+            job_store.update_job(
+                job_id,
+                status="completed",
+                stage="completed",
+                progress=100.0,
+                message="处理完成，可以开始检索",
+                result={
+                    "video_path": str(video_path),
+                    "metadata_path": str(result.metadata_path),
+                    "index_path": str(index_path),
+                },
+            )
+        except Exception as exc:  # pragma: no cover - defensive path
+            job_store.update_job(
+                job_id,
+                status="error",
+                stage="error",
+                message=f"处理失败: {exc}",
+                error=str(exc),
+            )
+
     @app.post("/api/add_video")
     async def add_video(file: UploadFile = File(...)) -> Dict[str, object]:
         if not config.image_model:
@@ -235,56 +309,48 @@ def create_app(config: WebAppConfig) -> FastAPI:
             candidate = upload_dir / f"{stem}_{timestamp}_{counter}{suffix}"
             counter += 1
 
+        job = job_store.new_job(
+            video_id=candidate.stem,
+            message="正在上传视频",
+            status="uploading",
+            stage="uploading",
+            progress=0.0,
+        )
+
         try:
             _save_upload(file, candidate)
         except Exception as exc:  # pragma: no cover
+            job_store.update_job(
+                job.job_id,
+                status="error",
+                stage="error",
+                message=f"保存视频失败: {exc}",
+                error=str(exc),
+            )
             raise HTTPException(status_code=500, detail=f"保存视频失败: {exc}") from exc
         finally:
             file.file.close()
 
-        async with processing_lock:
-            try:
-                result = process_video_to_embeddings(
-                    video_path=candidate,
-                    output_root=output_root,
-                    model_type=config.model_type,
-                    image_model_path=config.image_model,
-                    text_model_path=config.text_model,
-                    tokenizer_path=config.tokenizer_path,
-                    method=config.processing_method,
-                    interval=config.processing_interval,
-                    scene_threshold=config.processing_scene_threshold,
-                    image_format=config.processing_image_format,
-                    quality=config.processing_quality,
-                    batch_size=config.processing_batch_size,
-                    device=config.device,
-                    metadata_path=output_root / "metadata" / f"{candidate.stem}.json",
-                    encoder=encoder,
-                )
-            except Exception as exc:  # pragma: no cover
-                candidate.unlink(missing_ok=True)
-                raise HTTPException(status_code=500, detail=f"处理失败: {exc}") from exc
+        job_store.update_job(
+            job.job_id,
+            status="processing",
+            stage="extracting",
+            progress=5.0,
+            message="上传完成，准备处理",
+        )
 
-            try:
-                nonlocal indexer
-                indexer = build_or_update_index(
-                    metadata_paths=[result.metadata_path],
-                    index_path=index_path,
-                    manifest_path=manifest_path,
-                    metric=indexer.metric,
-                    normalize=indexer.normalize,
-                    indexer=indexer,
-                )
-            except Exception as exc:  # pragma: no cover
-                raise HTTPException(status_code=500, detail=f"索引更新失败: {exc}") from exc
+        task = asyncio.create_task(_process_job(job.job_id, candidate))
+        processing_tasks.add(task)
+        task.add_done_callback(processing_tasks.discard)
 
-        return {
-            "success": True,
-            "message": "处理完成，可以开始检索",
-            "video_path": str(candidate),
-            "metadata_path": str(result.metadata_path),
-            "index_path": str(index_path),
-        }
+        return {"job_id": job.job_id, "message": "已开始后台处理"}
+
+    @app.get("/api/add_video_status")
+    def add_video_status(job_id: Optional[str] = None) -> Dict[str, object]:
+        job = job_store.get(job_id) if job_id else job_store.last()
+        if not job:
+            raise HTTPException(status_code=404, detail="未找到任务")
+        return job.to_dict()
 
     return app
 
