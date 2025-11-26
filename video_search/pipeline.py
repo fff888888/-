@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time  # used for throttled progress reporting
 from pathlib import Path
-from typing import Sequence
+from typing import Callable, Optional, Sequence
 
 from .features import OnnxClipEncoder, build_frame_feature_cache
 from .frames import extract_keyframes
@@ -39,8 +40,36 @@ def process_video_to_embeddings(
     device: str = "cpu",
     metadata_path: Path | str | None = None,
     encoder: OnnxClipEncoder | None = None,
+    progress_callback: Optional[Callable[[str, float, str], None]] = None,
 ) -> ProcessingResult:
     """Extract frames + embeddings + metadata for a video."""
+
+    last_report_ts = 0.0
+    last_progress = 0.0
+
+    def _report(stage: str, progress_pct: float, message: str, *, force: bool = False) -> None:
+        nonlocal last_report_ts, last_progress
+        if progress_callback is None:
+            return
+        now = time.monotonic()
+        clamped = max(0.0, min(float(progress_pct), 100.0))
+        if not force:
+            if clamped < last_progress + 0.1 and (now - last_report_ts) < 1.0:
+                return
+            if (now - last_report_ts) < 1.0:
+                return
+        last_progress = max(last_progress, clamped)
+        last_report_ts = now
+        progress_callback(stage, clamped, message)
+
+    def _fraction(done: int, total: int) -> float:
+        if total > 0:
+            return min(max(done / float(total), 0.0), 1.0)
+        if done <= 0:
+            return 0.0
+        return min(done / float(done + 5), 1.0)
+
+    EXTRACT_WEIGHT = 0.75
 
     video = Path(video_path)
     root = Path(output_root)
@@ -52,6 +81,9 @@ def process_video_to_embeddings(
     frames_dir.mkdir(parents=True, exist_ok=True)
     embeddings_dir.mkdir(parents=True, exist_ok=True)
 
+    _report("extracting", 10.0, "开始处理", force=True)
+    _report("extracting_frames", 10.0, "正在抽帧", force=True)
+
     frames, fps = extract_keyframes(
         video_path=video,
         output_dir=frames_dir,
@@ -60,6 +92,11 @@ def process_video_to_embeddings(
         scene_threshold=scene_threshold,
         image_format=image_format,
         quality=quality,
+        progress_callback=lambda processed, total, saved: _report(
+            "extracting_frames",
+            10.0 + EXTRACT_WEIGHT * 100.0 * _fraction(processed, total),
+            f"抽帧进度 {saved}/{total or '?'}",
+        ),
     )
 
     local_encoder = encoder
@@ -81,7 +118,14 @@ def process_video_to_embeddings(
         encoder=local_encoder,
         output_path=feature_path,
         batch_size=batch_size,
+        progress_callback=lambda processed, total: _report(
+            "embedding_frames",
+            10.0 + EXTRACT_WEIGHT * 100.0 * _fraction(processed, total),
+            f"编码帧特征 {processed}/{total or len(frames)}",
+        ),
     )
+
+    _report("embedding_frames", 10.0 + EXTRACT_WEIGHT * 100.0, "帧特征生成完成", force=True)
 
     metadata = VideoMetadata(
         video_path=str(video),
