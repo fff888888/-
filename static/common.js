@@ -36,7 +36,10 @@
   const stageTextMap = {
     uploading: '⏳ 正在上传视频…',
     extracting: '🔍 正在抽帧与提取特征…',
+    extracting_frames: '🔍 正在抽帧…',
+    embedding_frames: '🧠 正在编码帧特征…',
     indexing: '📚 正在写入索引…',
+    processing: '🔄 正在处理中…',
     completed: '✅ 处理完成，可以开始检索',
     error: '❌ 处理出错，请重新上传',
   };
@@ -78,7 +81,7 @@
     }
   }
 
-  function updateProgressUI(progress, stage, etaSeconds) {
+  function updateProgressUI(progress, stage, etaSeconds, info = {}) {
     const pct = clampProgress(progress);
     const etaText = stage === 'completed' || stage === 'error' ? '' : formatEta(etaSeconds);
     if (els.progressBar) {
@@ -90,7 +93,13 @@
     if (els.etaText) els.etaText.textContent = etaText;
     showProgressArea();
     if (els.uploadStatus) {
-      const parts = [stageLabel(stage), `${pct}%`];
+      const parts = [];
+      if (info.message) parts.push(info.message);
+      if (info.total_items && info.total_items > 1) {
+        parts.push(`批量 ${info.completed_items || 0}/${info.total_items}`);
+      }
+      parts.push(stageLabel(stage), `${pct}%`);
+      if (info.current_item_name) parts.push(`当前：${info.current_item_name}`);
       if (etaText) parts.push(etaText);
       els.uploadStatus.textContent = parts.filter(Boolean).join(' ｜ ');
     }
@@ -98,41 +107,58 @@
 
   function stopPolling() {
     if (state.pollTimer) {
-      clearInterval(state.pollTimer);
+      clearTimeout(state.pollTimer);
       state.pollTimer = null;
     }
   }
 
-  async function pollStatus(jobId) {
+  function schedulePoll(jobId) {
     stopPolling();
     const tick = async () => {
       try {
-        const res = await fetch(`/api/add_video_status?job_id=${jobId}`);
+        const res = await fetch(`/api/add_video_status?job_id=${encodeURIComponent(jobId)}`);
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.detail || '查询进度失败');
 
         const stage = data.stage || 'uploading';
         const pct = clampProgress(data.progress);
         const etaSeconds = data.eta_seconds;
-        updateProgressUI(pct, stage, etaSeconds);
+        updateProgressUI(pct, stage, etaSeconds, {
+          message: data.message,
+          total_items: data.total_items,
+          completed_items: data.completed_items,
+          current_item_name: data.current_item_name,
+        });
+
+        if (stage === 'error' && els.uploadStatus) {
+          const parts = [stageLabel(stage)];
+          if (data.error) parts.push(data.error);
+          else if (data.message) parts.push(data.message);
+          els.uploadStatus.textContent = parts.filter(Boolean).join(' ｜ ');
+        }
 
         if (stage === 'completed' || pct >= 100) {
           stopPolling();
           setUploadProcessing(false);
           updateProgressUI(100, 'completed', 0);
           if (els.videoInput) els.videoInput.value = '';
-        } else if (stage === 'error') {
+          window.localStorage.removeItem('clipfinder:lastJobId');
+          return;
+        }
+        if (stage === 'error') {
           stopPolling();
           setUploadProcessing(false);
+          window.localStorage.removeItem('clipfinder:lastJobId');
+          return;
         }
+        state.pollTimer = setTimeout(tick, 500);
       } catch (err) {
         stopPolling();
         setUploadProcessing(false);
         if (els.uploadStatus) els.uploadStatus.textContent = err instanceof Error ? err.message : '查询进度失败';
       }
     };
-    state.pollTimer = setInterval(tick, 500);
-    tick();
+    state.pollTimer = setTimeout(tick, 0);
   }
 
   async function startUpload(file) {
@@ -148,6 +174,31 @@
       if (els.uploadStatus) els.uploadStatus.textContent = msg;
       throw new Error(msg);
     }
+    if (els.uploadStatus) {
+      els.uploadStatus.textContent = data.message || '已开始后台处理';
+    }
+    window.localStorage.setItem('clipfinder:lastJobId', data.job_id);
+    return data.job_id;
+  }
+
+  async function startBatchUpload(fileList) {
+    const formData = new FormData();
+    Array.from(fileList).forEach((file) => formData.append('files', file));
+    setUploadProcessing(true);
+    updateProgressUI(0, 'uploading', null);
+    const res = await fetch('/api/add_videos', { method: 'POST', body: formData });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.job_id) {
+      const msg = data.detail || data.message || '上传失败';
+      setUploadProcessing(false);
+      if (els.uploadStatus) els.uploadStatus.textContent = msg;
+      throw new Error(msg);
+    }
+    if (els.uploadStatus) {
+      const text = data.message || '批量任务已开始后台处理';
+      els.uploadStatus.textContent = text;
+    }
+    window.localStorage.setItem('clipfinder:lastJobId', data.job_id);
     return data.job_id;
   }
 
@@ -169,13 +220,21 @@
         return;
       }
       try {
-        const jobId = await startUpload(els.videoInput.files[0]);
+        const files = els.videoInput.files;
+        const jobId = files.length > 1 ? await startBatchUpload(files) : await startUpload(files[0]);
         state.currentJobId = jobId;
-        pollStatus(jobId);
+        schedulePoll(jobId);
       } catch (err) {
         if (err instanceof Error && els.uploadStatus) els.uploadStatus.textContent = err.message;
       }
     });
+
+    // 如果上一次上传未完成，自动恢复轮询
+    const lastJobId = window.localStorage.getItem('clipfinder:lastJobId');
+    if (lastJobId) {
+      state.currentJobId = lastJobId;
+      schedulePoll(lastJobId);
+    }
   }
 
   function renderResults() {
