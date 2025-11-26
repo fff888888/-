@@ -47,6 +47,18 @@ class IndexFrame:
 class FaissIndexer:
     """Helper around ``faiss.Index`` with frame bookkeeping."""
 
+    @classmethod
+    def create_empty(
+        cls,
+        dim: int = DEFAULT_EMBEDDING_DIM,
+        *,
+        metric: str = "ip",
+        normalize: bool = True,
+    ) -> "FaissIndexer":
+        """Create an empty index with the given configuration."""
+
+        return cls(dim, metric=metric, normalize=normalize)
+
     def __init__(
         self,
         dimension: int,

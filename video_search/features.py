@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Sequence
+from typing import Callable, List, Optional, Sequence
 
 import numpy as np
 import onnxruntime as ort
@@ -201,6 +201,7 @@ def build_frame_feature_cache(
     encoder: OnnxClipEncoder,
     output_path: Path | str,
     batch_size: int = 32,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
 ) -> FeatureCacheResult:
     """Encode frames into CLIP embeddings and persist to disk."""
 
@@ -215,6 +216,8 @@ def build_frame_feature_cache(
     all_embeddings: List[np.ndarray] = []
     updated_frames: List[FrameRecord] = []
     batch: List[FrameRecord] = []
+    total_frames = len(frames)
+    processed = 0
 
     for frame in frames:
         batch.append(frame)
@@ -222,11 +225,17 @@ def build_frame_feature_cache(
             embeddings = encoder.encode_image([item.image_path for item in batch])
             all_embeddings.append(embeddings)
             updated_frames.extend(batch)
+            processed += len(batch)
+            if progress_callback:
+                progress_callback(processed, total_frames)
             batch = []
     if batch:
         embeddings = encoder.encode_image([item.image_path for item in batch])
         all_embeddings.append(embeddings)
         updated_frames.extend(batch)
+        processed += len(batch)
+        if progress_callback:
+            progress_callback(processed, total_frames)
 
     stacked = np.concatenate(all_embeddings, axis=0) if all_embeddings else np.empty((0, encoder.dimension), dtype=np.float32)
     np.save(output, stacked)
