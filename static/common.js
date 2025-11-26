@@ -137,6 +137,13 @@
           els.uploadStatus.textContent = parts.filter(Boolean).join(' ｜ ');
         }
 
+        if (stage === 'error' && els.uploadStatus) {
+          const parts = [stageLabel(stage)];
+          if (data.error) parts.push(data.error);
+          else if (data.message) parts.push(data.message);
+          els.uploadStatus.textContent = parts.filter(Boolean).join(' ｜ ');
+        }
+
         if (stage === 'completed' || pct >= 100) {
           stopPolling();
           setUploadProcessing(false);
