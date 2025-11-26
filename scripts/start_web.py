@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 import uvicorn
+from huggingface_hub import HfHubHTTPError, hf_hub_download
 
 from video_search.webapp import WebAppConfig, create_app
 
@@ -44,6 +45,53 @@ DEFAULT_TOKENIZER_CANDIDATES = [
     "models/clip/tokenizer",
 ]
 
+DEFAULT_ONNX_MODEL_DIR = REPO_ROOT / "models" / "clip-onnx"
+ONNX_REPO_ID = "Xenova/clip-vit-base-patch32-onnx"
+ONNX_REQUIRED_FILES = {
+    "text_model.onnx": "文本编码模型",
+    "vision_model.onnx": "图像编码模型",
+    "tokenizer.json": "Tokenizer",
+}
+
+
+def _ensure_clip_onnx_models(target_dir: Path) -> dict[str, Path]:
+    """Ensure CLIP ONNX artifacts exist locally, downloading if missing."""
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+    found: dict[str, Path] = {}
+    missing: list[str] = []
+
+    for filename in ONNX_REQUIRED_FILES:
+        candidate = target_dir / filename
+        if candidate.exists():
+            found[filename] = candidate
+        else:
+            missing.append(filename)
+
+    if not missing:
+        return found
+
+    print(
+        f"[INFO] 缺少 ONNX 模型文件 {missing}，尝试从 Hugging Face 下载 {ONNX_REPO_ID}"
+    )
+    for filename in missing:
+        try:
+            local = hf_hub_download(
+                repo_id=ONNX_REPO_ID,
+                filename=filename,
+                local_dir=target_dir,
+                local_dir_use_symlinks=False,
+            )
+            path = Path(local)
+            found[filename] = path
+            print(f"[INFO] 已下载 {filename} 至 {path}")
+        except (HfHubHTTPError, OSError, ValueError) as exc:
+            print(f"[WARN] 下载 {filename} 失败: {exc}")
+        except Exception as exc:  # pragma: no cover - defensive
+            print(f"[WARN] 下载 {filename} 失败: {exc}")
+
+    return found
+
 
 def _find_first_existing(candidates: Iterable[str], description: str, required: bool) -> Optional[Path]:
     for relative in candidates:
@@ -55,6 +103,14 @@ def _find_first_existing(candidates: Iterable[str], description: str, required: 
             f"找不到 {description}，请检查路径或通过命令行参数显式传入。"
         )
     return None
+
+
+def _preferred_path(candidates: Iterable[str]) -> Path:
+    """Return the first candidate path even if it does not exist."""
+
+    for relative in candidates:
+        return (REPO_ROOT / relative).expanduser()
+    raise SystemExit("未提供任何候选路径")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -84,23 +140,19 @@ def main(argv: Optional[list[str]] = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    index_path = Path(args.index) if args.index else _find_first_existing(
-        DEFAULT_INDEX_CANDIDATES, "索引文件", required=True
-    )
+    index_path = Path(args.index) if args.index else _preferred_path(DEFAULT_INDEX_CANDIDATES)
 
     if args.manifest:
         manifest_path = Path(args.manifest)
     else:
-        manifest_path = _find_first_existing(
-            DEFAULT_MANIFEST_CANDIDATES, "manifest 文件", required=True
-        )
+        manifest_path = _preferred_path(DEFAULT_MANIFEST_CANDIDATES)
 
     text_model = Path(args.text_model) if args.text_model else _find_first_existing(
-        DEFAULT_TEXT_MODEL_CANDIDATES, "文本 ONNX 模型", required=True
+        DEFAULT_TEXT_MODEL_CANDIDATES, "文本 ONNX 模型", required=False
     )
 
     tokenizer = args.tokenizer or (
-        _find_first_existing(DEFAULT_TOKENIZER_CANDIDATES, "tokenizer", required=True)
+        _find_first_existing(DEFAULT_TOKENIZER_CANDIDATES, "tokenizer", required=False)
     )
 
     image_model: Path | None
@@ -110,6 +162,19 @@ def main(argv: Optional[list[str]] = None) -> None:
         image_model = _find_first_existing(
             DEFAULT_IMAGE_MODEL_CANDIDATES, "图像 ONNX 模型", required=False
         )
+
+    if text_model is None or image_model is None or tokenizer is None:
+        assets = _ensure_clip_onnx_models(DEFAULT_ONNX_MODEL_DIR)
+        text_model = text_model or assets.get("text_model.onnx")
+        image_model = image_model or assets.get("vision_model.onnx")
+        tokenizer = tokenizer or assets.get("tokenizer.json")
+
+    if text_model is None:
+        print("[WARN] 文本模型缺失，搜索接口将返回模型未加载错误")
+    if image_model is None:
+        print("[WARN] 图像模型缺失，无法处理上传/索引任务")
+    if tokenizer is None:
+        print("[WARN] tokenizer 缺失，文本编码将不可用")
 
     config = WebAppConfig(
         index_path=index_path,

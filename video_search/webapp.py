@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from .features import OnnxClipEncoder
@@ -107,9 +107,6 @@ def _render_template(config: WebAppConfig, upload_dir: Optional[Path]) -> str:
 
 
 def create_app(config: WebAppConfig) -> FastAPI:
-    if config.text_model is None:
-        raise ValueError("text_model 不能为空，Web UI 需要文本编码模型")
-
     index_path = config.index_path.resolve()
     manifest_path = (
         Path(config.manifest_path).expanduser()
@@ -156,7 +153,17 @@ def create_app(config: WebAppConfig) -> FastAPI:
         return _render_template(config, upload_dir)
 
     @app.post("/api/search")
-    def search(request: SearchRequest) -> Dict[str, List[Dict[str, object]]]:
+    def search(request: SearchRequest) -> Dict[str, object]:
+        if encoder is None or encoder.text_session is None:
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "model_unavailable": True,
+                    "message": "模型未加载，暂不可搜索",
+                    "results": [],
+                },
+            )
+
         query = request.query.strip()
         if not query:
             raise HTTPException(status_code=400, detail="query 不能为空")
