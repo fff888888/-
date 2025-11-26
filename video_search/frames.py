@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import Iterable, List, Literal, Tuple
+from typing import Callable, Iterable, List, Literal, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -39,6 +39,8 @@ def _extract_with_interval(
     interval: float,
     image_format: str,
     quality: int,
+    total_frames: int,
+    progress_callback: Optional[Callable[[int, int, int], None]] = None,
 ) -> List[FrameRecord]:
     records: List[FrameRecord] = []
     frame_interval = max(int(round(interval * fps)) if interval > 0 else 1, 1)
@@ -61,6 +63,8 @@ def _extract_with_interval(
                 )
             )
             saved_index += 1
+            if progress_callback:
+                progress_callback(frame_index + 1, total_frames, saved_index)
         frame_index += 1
     return records
 
@@ -72,6 +76,8 @@ def _extract_with_scene_diff(
     threshold: float,
     image_format: str,
     quality: int,
+    total_frames: int,
+    progress_callback: Optional[Callable[[int, int, int], None]] = None,
 ) -> List[FrameRecord]:
     records: List[FrameRecord] = []
     frame_index = 0
@@ -104,6 +110,8 @@ def _extract_with_scene_diff(
             )
             saved_index += 1
             previous_frame = frame
+            if progress_callback:
+                progress_callback(frame_index + 1, total_frames, saved_index)
         frame_index += 1
 
     return records
@@ -117,6 +125,7 @@ def extract_keyframes(
     scene_threshold: float = 30.0,
     image_format: str = "jpg",
     quality: int = 95,
+    progress_callback: Optional[Callable[[int, int, int], None]] = None,
 ) -> Tuple[List[FrameRecord], float]:
     """Extract keyframes from a video.
 
@@ -158,6 +167,8 @@ def extract_keyframes(
     if math.isnan(fps) or fps <= 0:
         fps = 30.0
 
+    total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+
     if method == "interval":
         records = _extract_with_interval(
             capture=capture,
@@ -166,6 +177,8 @@ def extract_keyframes(
             interval=interval,
             image_format=image_format,
             quality=quality,
+            total_frames=total_frames,
+            progress_callback=progress_callback,
         )
     elif method == "scene-diff":
         records = _extract_with_scene_diff(
@@ -175,6 +188,8 @@ def extract_keyframes(
             threshold=scene_threshold,
             image_format=image_format,
             quality=quality,
+            total_frames=total_frames,
+            progress_callback=progress_callback,
         )
     else:
         raise ValueError(f"Unsupported extraction method: {method}")

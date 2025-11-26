@@ -20,6 +20,9 @@ class JobRecord:
     eta_seconds: Optional[float] = None
     error: Optional[str] = None
     result: Optional[Dict[str, object]] = None
+    total_items: int = 1
+    completed_items: int = 0
+    current_item_name: Optional[str] = None
     started_at: Optional[datetime] = None
     created_at: datetime = field(default_factory=datetime.utcnow)
     updated_at: datetime = field(default_factory=datetime.utcnow)
@@ -35,6 +38,9 @@ class JobRecord:
             "eta_seconds": self.eta_seconds,
             "error": self.error,
             "result": self.result,
+            "total_items": self.total_items,
+            "completed_items": self.completed_items,
+            "current_item_name": self.current_item_name,
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
@@ -56,6 +62,9 @@ class JobRecord:
             eta_seconds=data.get("eta_seconds"),
             error=data.get("error"),
             result=data.get("result"),
+            total_items=int(data.get("total_items", 1) or 1),
+            completed_items=int(data.get("completed_items", 0) or 0),
+            current_item_name=data.get("current_item_name"),
             started_at=datetime.fromisoformat(str(data.get("started_at")))
             if data.get("started_at")
             else None,
@@ -119,6 +128,8 @@ class JobStore:
         status: str = "pending",
         stage: str = "uploading",
         progress: float = 0.0,
+        total_items: int = 1,
+        current_item_name: Optional[str] = None,
     ) -> JobRecord:
         with self._lock:
             job_id = self._next_id()
@@ -129,6 +140,8 @@ class JobStore:
                 status=status,
                 stage=stage,
                 progress=progress,
+                total_items=max(1, int(total_items)),
+                current_item_name=current_item_name,
             )
             self.jobs[job_id] = rec
             self.latest_id = job_id
@@ -143,6 +156,15 @@ class JobStore:
             for key, value in kwargs.items():
                 if key == "progress" and isinstance(value, (int, float)):
                     value = max(0.0, min(float(value), 100.0))
+                if key in {"total_items", "completed_items"}:
+                    try:
+                        value = int(value)
+                    except Exception:
+                        value = getattr(job, key)
+                    if key == "total_items":
+                        value = max(1, value)
+                    else:
+                        value = max(0, value)
                 setattr(job, key, value)
             now = datetime.utcnow()
             if job.started_at is None and kwargs.get("status") in {"processing", "uploading"}:

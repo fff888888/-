@@ -72,6 +72,18 @@ def _safe_stem(name: str) -> str:
     return cleaned or "video"
 
 
+def _make_destination(filename: str, base_dir: Path) -> Path:
+    suffix = Path(filename).suffix or ".mp4"
+    stem = _safe_stem(filename)
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    candidate = base_dir / f"{stem}_{timestamp}{suffix}"
+    counter = 1
+    while candidate.exists():
+        candidate = base_dir / f"{stem}_{timestamp}_{counter}{suffix}"
+        counter += 1
+    return candidate
+
+
 def _save_upload(file: UploadFile, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     with destination.open("wb") as buffer:
@@ -299,15 +311,17 @@ def create_app(config: WebAppConfig) -> FastAPI:
             raise HTTPException(status_code=400, detail="服务器未配置图像模型，暂不支持上传处理")
         if not file.filename:
             raise HTTPException(status_code=400, detail="请提供视频文件")
+        candidate = _make_destination(file.filename, upload_dir)
 
-        suffix = Path(file.filename).suffix or ".mp4"
-        stem = _safe_stem(file.filename)
-        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        candidate = upload_dir / f"{stem}_{timestamp}{suffix}"
-        counter = 1
-        while candidate.exists():
-            candidate = upload_dir / f"{stem}_{timestamp}_{counter}{suffix}"
-            counter += 1
+        job = job_store.new_job(
+            video_id=candidate.stem,
+            message="正在上传视频",
+            status="uploading",
+            stage="uploading",
+            progress=0.0,
+            total_items=1,
+            current_item_name=file.filename,
+        )
 
         job = job_store.new_job(
             video_id=candidate.stem,
