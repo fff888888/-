@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import time  # used for throttled progress reporting
+import time
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 

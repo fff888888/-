@@ -239,14 +239,8 @@ def create_app(config: WebAppConfig) -> FastAPI:
         }
         return StreamingResponse(iterator(), media_type="video/mp4", headers=headers)
 
-    async def _process_items(job_id: str, video_paths: List[Path]) -> None:
+    async def _process_job(job_id: str, video_path: Path) -> None:
         nonlocal indexer
-
-        total_items = max(len(video_paths), 1)
-        completed_items = 0
-        current_name: Optional[str] = None
-        current_item_progress = 0.0
-        results: List[Dict[str, object]] = []
 
         def _update_index(result_metadata_path: Path) -> None:
             nonlocal indexer
@@ -259,88 +253,52 @@ def create_app(config: WebAppConfig) -> FastAPI:
                 indexer=indexer,
             )
 
-        def _progress(stage: str, progress_pct: float, message: str) -> None:
-            nonlocal current_item_progress
-            per_item = max(0.0, min(float(progress_pct), 100.0))
-            current_item_progress = max(current_item_progress, per_item)
-            overall = ((completed_items + current_item_progress / 100.0) / total_items) * 100.0
-            text = message
-            if total_items > 1:
-                text = f"[{completed_items + 1}/{total_items}] {message}"
+        try:
             job_store.update_job(
                 job_id,
                 status="processing",
-                stage=stage,
-                progress=overall,
-                message=text,
-                total_items=total_items,
-                completed_items=completed_items,
-                current_item_name=current_name,
+                stage="extracting",
+                progress=10.0,
+                message="正在抽帧与提取特征",
             )
-
-        try:
-            for idx, video_path in enumerate(video_paths):
-                current_name = video_path.name
-                current_item_progress = 0.0
-                _progress(
-                    "extracting_frames",
-                    10.0,
-                    f"准备处理 {current_name} ({idx + 1}/{total_items})",
-                )
-                async with processing_lock:
-                    result = await asyncio.to_thread(
-                        process_video_to_embeddings,
-                        video_path,
-                        output_root,
-                        model_type=config.model_type,
-                        image_model_path=config.image_model,
-                        text_model_path=config.text_model,
-                        tokenizer_path=config.tokenizer_path,
-                        method=config.processing_method,
-                        interval=config.processing_interval,
-                        scene_threshold=config.processing_scene_threshold,
-                        image_format=config.processing_image_format,
-                        quality=config.processing_quality,
-                        batch_size=config.processing_batch_size,
-                        device=config.device,
-                        metadata_path=output_root / "metadata" / f"{video_path.stem}.json",
-                        encoder=encoder,
-                        progress_callback=_progress,
-                    )
-                    _progress("indexing", max(current_item_progress, 90.0), f"{current_name}: 正在写入索引")
-                    await asyncio.to_thread(_update_index, result.metadata_path)
-
-                completed_items += 1
-                results.append(
-                    {
-                        "video_path": str(video_path),
-                        "metadata_path": str(result.metadata_path),
-                        "index_path": str(index_path),
-                    }
+            async with processing_lock:
+                result = await asyncio.to_thread(
+                    process_video_to_embeddings,
+                    video_path,
+                    output_root,
+                    model_type=config.model_type,
+                    image_model_path=config.image_model,
+                    text_model_path=config.text_model,
+                    tokenizer_path=config.tokenizer_path,
+                    method=config.processing_method,
+                    interval=config.processing_interval,
+                    scene_threshold=config.processing_scene_threshold,
+                    image_format=config.processing_image_format,
+                    quality=config.processing_quality,
+                    batch_size=config.processing_batch_size,
+                    device=config.device,
+                    metadata_path=output_root / "metadata" / f"{video_path.stem}.json",
+                    encoder=encoder,
                 )
                 job_store.update_job(
                     job_id,
-                    status="processing",
-                    stage="processing",
-                    progress=(completed_items / total_items) * 100.0,
-                    message=f"已完成 {completed_items}/{total_items}: {current_name}",
-                    total_items=total_items,
-                    completed_items=completed_items,
-                    current_item_name=current_name,
+                    stage="indexing",
+                    progress=85.0,
+                    message="正在写入索引",
                 )
+                await asyncio.to_thread(_update_index, result.metadata_path)
 
-            final_result: Dict[str, object] = (
-                results[-1]
-                if len(results) == 1
-                else {"items": results, "index_path": str(index_path)}
-            )
             job_store.update_job(
                 job_id,
                 status="completed",
                 stage="completed",
                 progress=100.0,
                 message="处理完成，可以开始检索",
-                result=final_result,
+                result={
+                    "video_path": str(video_path),
+                    "metadata_path": str(result.metadata_path),
+                    "index_path": str(index_path),
+                },
             )
         except Exception as exc:  # pragma: no cover - defensive path
             job_store.update_job(
@@ -349,9 +307,6 @@ def create_app(config: WebAppConfig) -> FastAPI:
                 stage="error",
                 message=f"处理失败: {exc}",
                 error=str(exc),
-                total_items=total_items,
-                completed_items=completed_items,
-                current_item_name=current_name,
             )
 
     @app.post("/api/add_video")
@@ -372,6 +327,14 @@ def create_app(config: WebAppConfig) -> FastAPI:
             current_item_name=file.filename,
         )
 
+        job = job_store.new_job(
+            video_id=candidate.stem,
+            message="正在上传视频",
+            status="uploading",
+            stage="uploading",
+            progress=0.0,
+        )
+
         try:
             _save_upload(file, candidate)
         except Exception as exc:  # pragma: no cover
@@ -390,92 +353,15 @@ def create_app(config: WebAppConfig) -> FastAPI:
             job.job_id,
             status="processing",
             stage="extracting",
-            progress=10.0,
+            progress=5.0,
             message="上传完成，准备处理",
-            total_items=1,
-            completed_items=0,
-            current_item_name=candidate.name,
         )
 
-        task = asyncio.create_task(_process_items(job.job_id, [candidate]))
+        task = asyncio.create_task(_process_job(job.job_id, candidate))
         processing_tasks.add(task)
         task.add_done_callback(processing_tasks.discard)
 
         return {"job_id": job.job_id, "message": "已开始后台处理"}
-
-    @app.post("/api/add_videos")
-    async def add_videos(files: List[UploadFile] = File(...)) -> Dict[str, object]:
-        if not config.image_model:
-            raise HTTPException(status_code=400, detail="服务器未配置图像模型，暂不支持上传处理")
-        if not files:
-            raise HTTPException(status_code=400, detail="请提供至少一个视频文件")
-
-        destinations: List[Path] = []
-        job = job_store.new_job(
-            video_id="batch",
-            message="正在上传视频",
-            status="uploading",
-            stage="uploading",
-            progress=0.0,
-            total_items=len(files),
-            current_item_name=files[0].filename if files else None,
-        )
-
-        try:
-            for file in files:
-                if not file.filename:
-                    raise HTTPException(status_code=400, detail="存在未命名的文件，无法处理")
-                destination = _make_destination(file.filename, upload_dir)
-                try:
-                    _save_upload(file, destination)
-                finally:
-                    file.file.close()
-                destinations.append(destination)
-                job_store.update_job(
-                    job.job_id,
-                    status="uploading",
-                    stage="uploading",
-                    progress=0.0,
-                    message=f"已上传 {len(destinations)}/{len(files)}",
-                    total_items=len(files),
-                    completed_items=0,
-                    current_item_name=file.filename,
-                )
-        except Exception as exc:  # pragma: no cover
-            job_store.update_job(
-                job.job_id,
-                status="error",
-                stage="error",
-                message=f"保存视频失败: {exc}",
-                error=str(exc),
-            )
-            raise
-
-        if not destinations:
-            job_store.update_job(
-                job.job_id,
-                status="error",
-                stage="error",
-                message="没有可处理的视频文件",
-            )
-            raise HTTPException(status_code=400, detail="没有可处理的视频文件")
-
-        job_store.update_job(
-            job.job_id,
-            status="processing",
-            stage="extracting",
-            progress=10.0,
-            message="上传完成，准备处理",
-            total_items=len(destinations),
-            completed_items=0,
-            current_item_name=destinations[0].name,
-        )
-
-        task = asyncio.create_task(_process_items(job.job_id, destinations))
-        processing_tasks.add(task)
-        task.add_done_callback(processing_tasks.discard)
-
-        return {"job_id": job.job_id, "message": "批量任务已开始"}
 
     @app.get("/api/add_video_status")
     def add_video_status(job_id: Optional[str] = None) -> Dict[str, object]:
