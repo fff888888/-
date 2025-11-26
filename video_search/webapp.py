@@ -133,7 +133,11 @@ def create_app(config: WebAppConfig) -> FastAPI:
     )
     upload_dir.mkdir(parents=True, exist_ok=True)
 
-    indexer = FaissIndexer.load(index_path, manifest_path)
+    try:
+        indexer = FaissIndexer.load(index_path, manifest_path)
+    except Exception as exc:  # pragma: no cover - startup fallback
+        print(f"[WARN] Failed to load index at startup: {exc!r}, starting with empty index")
+        indexer = FaissIndexer.create_empty()
     encoder = OnnxClipEncoder(
         model_type=config.model_type,
         image_model_path=config.image_model,
